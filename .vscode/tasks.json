@@ -1,0 +1,19 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build - Upload Arduino",
+			"command": "${command:arduino.upload}",
+			"group": "build"
+		},
+		{
+			"label": "Launch",
+			"detail": "Build - Upload - Connect Arduino",
+			"group": "build",
+			"dependsOrder": "sequence",
+			"dependsOn": [
+				"Build - Upload Arduino"
+			]
+		}
+	]
+}

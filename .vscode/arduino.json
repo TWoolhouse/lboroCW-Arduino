@@ -1,0 +1,6 @@
+{
+    "port": "COM4",
+    "board": "arduino:avr:uno",
+    "sketch": "COA202\\COA202.ino",
+    "output": "build/"
+}

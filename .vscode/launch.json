@@ -1,0 +1,16 @@
+{
+	"configurations": [
+		{
+			"name": "Python Comms",
+			"type": "python",
+			"request": "launch",
+			"program": "${workspaceFolder}/launch.py",
+			"args": [
+				"COM4"
+			],
+			"console": "integratedTerminal",
+			"justMyCode": true,
+			"preLaunchTask": "Launch"
+		}
+	]
+}
