@@ -1,18 +1,9 @@
 ---
 title: 21COA202 Coursework
-subtitle: 
-author: _id number_ 
-date: Semester 2 / SAP
+subtitle:
+author: F121584
+date: Semester 2
 ---
-
-* *In this template delete all the text in italics and replace with your
-  own as appropriate.*
-
-* *Delete Semester 2 or SAP from the Date above as appropriate.*
-
-* *Add your id number above*
-
-* *There is no need to write an introduction here*
 
 ## FSMs
 
@@ -52,7 +43,7 @@ date: Semester 2 / SAP
   additional code and changes to your FSM .  Give examples of types,
   variables and code that is important.*
 
-* *do not write anything here--put it in the subsections following.*  
+* *do not write anything here--put it in the subsections following.*
 
 * ***Delete the text from Extension Features to here***
 
@@ -97,7 +88,7 @@ If you have prepared this using the Word template then use the styles `Heading 1
 ### From Markdown source
 
 If you are preparing this in `markdown`, then I applaud you.  To convert to a PDF use the `pandoc` and LaTeX software (available from <https://pandoc.org/> and <https://tug.org/texlive/>).  `pandoc` is installed in the N001/2/3 labs under both MacOS and Windows.
- 
+
 ~~~bash
 pandoc -N -o output.pdf --template=coa202.latex input.md --shift-heading-level-by=-1
 ~~~
