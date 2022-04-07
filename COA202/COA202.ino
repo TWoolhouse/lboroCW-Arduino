@@ -9,9 +9,7 @@ Adafruit_RGBLCDShield lcd;
 #define STUDENT_ID "F121584"
 
 // Extensions
-// #define EXT_HCI
-#define EXT_EEPROM
-#define EXT_SCROLL
+#define EXT_HCI
 
 // Constants
 namespace cexpr {
@@ -25,11 +23,11 @@ namespace cexpr {
 	// Such that the stack does not become corrupted
 	constexpr uint16_t memory_cull = 512;
 
-	constexpr uint8_t create = 15;
-	constexpr uint8_t write = 4;
-	constexpr uint8_t protocol = max(create, write);
+	constexpr uint8_t desc = 16; // Includes null
+	constexpr uint8_t create = desc - 1;
+	constexpr uint8_t write = 3;
+	constexpr uint8_t protocol = max(desc, write) + 1;
 	constexpr uint8_t channels = 26;
-	constexpr uint8_t desc = create + 1; // Includes null
 	constexpr uint8_t history = 64;
 }
 #define EXTENSIONS "UDCHARS,FREERAM,HCI,EEPROM,RECENT,NAMES,SCROLL"
@@ -67,6 +65,8 @@ Serial.println(value); \
 
 // Helper Macros
 #define BRACED_INIT_LIST(...) { __VA_ARGS__ }
+#define sizeof_arr(arr, type) (sizeof(arr) / sizeof(type))
+
 #if defined(_MSC_VER) // Force Inline
 #define INLINE inline __forceinline
 #elif defined(__GNUC__) || defined(__GNUG__) || defined(__clang__)
@@ -95,6 +95,7 @@ const ::byte __img_ ## name ## _ ## pos ## __ [8] PROGMEM = BRACED_INIT_LIST ima
 
 #pragma region Free Memory
 #ifdef __arm__
+
 // should use uinstd.h to define sbrk but Due causes a conflict
 extern "C" char* sbrk(int incr);
 #else  // __ARM__
@@ -188,7 +189,6 @@ protected:
 template<>
 State<Display>& State<Display>::operator=(const Type state);
 
-#ifdef EXT_SCROLL
 enum class Scroll : uint8_t {
 	PAUSE, RUN
 };
@@ -216,7 +216,6 @@ public:
 		return *this;
 	}
 };
-#endif // EXT_SCROLL
 
 namespace Arrow {
 	PICTURE(UP, 0, (B00000, B00100, B01110, B10101, B00100, B00100, B00100, B00000));
@@ -316,13 +315,11 @@ public:
 };
 
 namespace Channel {
-#ifdef EXT_EEPROM
 	class eeprom {
 	public:
 		static void setup() {
 			bool invalid = false;
-			constexpr uint8_t indicies[2] = { 0, size::precheck - 1 };
-			for (auto i : indicies) {
+			for (uint8_t i = 0; i < size::precheck; ++i) {
 				const uint8_t idx = offset::precheck + i;
 				if (EEPROM.read(idx) != magic) {
 					invalid = true;
@@ -330,9 +327,6 @@ namespace Channel {
 				}
 			}
 			if (invalid) {
-				for (uint8_t i = 1; i < size::precheck - 1; ++i) {
-					EEPROM.update(offset::precheck + i, 0);
-				}
 				for (uint8_t i = 0; i < cexpr::channels; ++i) {
 					if (EEPROM.read(pos(i) + offset::header) == magic)
 						EEPROM.update(pos(i) + offset::header, magic + 1);
@@ -347,7 +341,7 @@ namespace Channel {
 			return EEPROM.read(pos(index) + which);
 		}
 		static const char* desc(const uint8_t index) {
-			static char cache[16];
+			static char cache[cexpr::desc];
 			uint16_t idx = pos(index) + offset::desc;
 			for (uint8_t i = 0; i < size::desc; ++i) {
 				cache[i] = EEPROM.read(idx + i);
@@ -367,7 +361,7 @@ namespace Channel {
 		}
 		static void desc(uint8_t index, const char* buffer) {
 			const uint16_t idx = pos(index) + offset::desc;
-			const uint8_t length = strlen(buffer);
+			const uint8_t length = min(strlen(buffer), size::desc);
 			for (uint8_t i = 0; i <= length; ++i) {
 				EEPROM.update(idx + i, buffer[i]);
 			}
@@ -382,11 +376,11 @@ namespace Channel {
 		// Size of a channel in the EEPROM
 		// Header + Min + Max + Desc
 		struct size {
-			static constexpr uint8_t precheck = 6;
+			static constexpr uint8_t precheck = 2;
 			static constexpr uint8_t header = 1;
 			static constexpr uint8_t min = 1;
 			static constexpr uint8_t max = 1;
-			static constexpr uint8_t desc = 15;
+			static constexpr uint8_t desc = cexpr::desc - 1;
 			static constexpr uint8_t all = header + min + max + desc;
 		};
 	public:
@@ -398,8 +392,6 @@ namespace Channel {
 			static constexpr uint8_t desc = max + size::max;
 		};
 	};
-
-#endif // EXT_EEPROM
 
 	union View {
 	private:
@@ -447,13 +439,21 @@ namespace Channel {
 
 		static Display* active(const View channel);
 
-		Display(uint8_t row, View channel) : row(row), channel(channel), events(Event::Flag::All) {}
+		Display() : row(2), channel(cexpr::channels), events(Event::Flag::All), scroll() {}
+		Display(uint8_t row, View channel) : row(row), channel(channel), events(Event::Flag::All), scroll() {}
 
 		Display& operator=(View channel) {
 			if (this->channel.index == channel.index)	return *this;
-			if (!active(this->channel))
+			if (!active(channel))
 				scroll = Scroll::PAUSE;
 			this->channel = channel;
+			events = Event::Flag::All;
+			return *this;
+		}
+		Display& operator=(const Display& other) {
+			if (this == &other)	return *this;
+			channel = other.channel;
+			memcpy(&scroll, &other.scroll, sizeof(Scroller));
 			events = Event::Flag::All;
 			return *this;
 		}
@@ -522,9 +522,16 @@ namespace Window {
 	};
 
 	class Menu {
+	public:
+		enum Direction : int8_t {
+			UP = -1,
+			CONSTANT = 0,
+			DOWN = 1,
+		};
+	protected:
 		friend Channel::Display;
 		Timer selector{ 1000 };
-		Channel::Display channels[2] = { {0, UINT8_MAX}, {1, UINT8_MAX} };
+		Channel::Display channels[cexpr::lcd_height] = { {0, UINT8_MAX}, {1, UINT8_MAX} };
 
 		const uint8_t find_up(uint8_t idx) {
 			for (--idx; idx < UINT8_MAX && !Channel::View(idx).exists(); --idx);
@@ -554,6 +561,30 @@ namespace Window {
 
 			display.reset();
 		}
+
+		bool evaluate_index(const Direction dir, Channel::Display(&previous)[cexpr::lcd_height]) {
+			switch (dir) {
+				case Direction::UP:
+					channels[0] = find_up(channels[0].channel);
+					if (channels[0].valid() && channels[0].channel != previous[0].channel) {
+						channels[1] = previous[0];
+						return true;
+					}	return false;
+
+				case Direction::CONSTANT:
+					channels[1] = find_down(channels[0].channel);
+					return channels[1].channel != previous[1].channel;
+
+				case Direction::DOWN:
+					channels[1] = find_down(channels[1].channel);
+					if (channels[1].valid() && channels[1].channel != previous[1].channel) {
+						channels[0] = previous[1];
+						return true;
+					}	return false;
+			}
+			return false;
+		}
+
 	public:
 		void begin() {
 			Backlight = Backlight::Colour::WHITE;
@@ -597,12 +628,6 @@ namespace Window {
 			if (events & BUTTON_DOWN && evaluate_index(Direction::DOWN))
 				return;
 		}
-
-		enum Direction : int8_t {
-			UP = -1,
-			CONSTANT = 0,
-			DOWN = 1,
-		};
 		inline void event(const Event::Flag event) {
 			for (auto& display : channels)
 				display.event(event);
@@ -612,28 +637,12 @@ namespace Window {
 			evaluate_index(Window::Menu::Direction::CONSTANT);
 		}
 		bool evaluate_index(const Direction dir) {
-			uint8_t old[2] = { channels[0].channel.index, channels[1].channel.index };
-			if (channels[0].channel.index >= cexpr::channels)
+			if (channels[0].channel >= cexpr::channels)
 				if (channels[0] = find_down(UINT8_MAX); !channels[0].valid())
-					return;
-			switch (dir) {
-				case Direction::UP:
-					channels[0] = find_up(channels[0].channel.index);
-					if (channels[0].valid() && channels[0].channel != old[0]) {
-						channels[1] = old[0];
-						return true;
-					}	return false;
-				case Direction::CONSTANT:
-					channels[1] = find_down(channels[0].channel.index);
-					return channels[1].channel.index != old[1];
-				case Direction::DOWN:
-					channels[1] = find_down(channels[1].channel.index);
-					if (channels[1].valid() && channels[1].channel != old[1]) {
-						channels[0] = old[1];
-						return true;
-					}	return false;
-			}
-			return false;
+					return false;
+			Channel::Display old[cexpr::lcd_height];
+			memcpy(&old, &channels, sizeof(old));
+			return evaluate_index(dir, old);
 		}
 		// GLOBAL PREDICATE TO DETERMINE OUR STATE AND CHEAT LOL XD
 	} menu;
