@@ -9,26 +9,30 @@ Adafruit_RGBLCDShield lcd;
 #define STUDENT_ID "F121584"
 
 // Extensions
-#define EXT_UDCHARS
-#define EXT_FREERAM
 // #define EXT_HCI
 #define EXT_EEPROM
-#define EXT_RECENT
-#define EXT_NAMES
 #define EXT_SCROLL
 
 // Constants
-#define BAUD_RATE 9600
-#define WIDTH 16
-#define HEIGHT 2
+namespace cexpr {
+	constexpr uint16_t baud_rate = 9600;
+	constexpr uint8_t lcd_width = 16;
+	constexpr uint8_t lcd_height = 2;
+
+	constexpr uint16_t ram_size = 2048;
+	constexpr uint16_t eeprom_size = E2END + 1;
+	// Amount of Free Ram left to begin culling dynamic memory
+	// Such that the stack does not become corrupted
+	constexpr uint16_t memory_cull = 512;
+
+	constexpr uint8_t create = 15;
+	constexpr uint8_t write = 4;
+	constexpr uint8_t protocol = max(create, write);
+	constexpr uint8_t channels = 26;
+	constexpr uint8_t desc = create + 1; // Includes null
+	constexpr uint8_t history = 64;
+}
 #define EXTENSIONS "UDCHARS,FREERAM,HCI,EEPROM,RECENT,NAMES,SCROLL"
-
-#define RAM_MAX 2048
-#define EEPROM_MAX (E2END + 1) // Taken from EEPROM.length() but as constexpr
-
-#ifdef EXT_RECENT
-#define MEMORY_CULLING 500
-#endif // EXT_RECENT
 
 // Debug Output
 #ifdef DEBUG
@@ -42,11 +46,26 @@ Serial.print(__LINE__); \
 Serial.print(F(" >> ")); \
 Serial.println(message); \
 }
+
+// Log Double Debug - A pair of values
+#define log_ddebug(message, value) { \
+Serial.print(F("DEBUG: ")); \
+Serial.print(millis()); \
+Serial.print(' '); \
+Serial.print(__PRETTY_FUNCTION__); \
+Serial.print(' '); \
+Serial.print(__LINE__); \
+Serial.print(F(" >> ")); \
+Serial.print(message); \
+Serial.print(F(": ")); \
+Serial.println(value); \
+}
 #else // !DEBUG
 #define log_debug(message)
+#define log_ddebug(message, value)
 #endif // DEBUG
 
-// Helpers
+// Helper Macros
 #define BRACED_INIT_LIST(...) { __VA_ARGS__ }
 #if defined(_MSC_VER) // Force Inline
 #define INLINE inline __forceinline
@@ -56,17 +75,7 @@ Serial.println(message); \
 #define INLINE inline
 #endif // Force Inline
 
-// Backlight
-enum Background : uint8_t {
-	CLEAR = 0,
-	RED = 1,
-	GREEN = 2,
-	YELLOW = 3,
-	PURPLE = 5,
-	WHITE = 7
-};
-
-// Picutures
+// Custom Character Pictures
 struct Picture {
 	const uint8_t pos;
 	const byte* const img;
@@ -84,7 +93,7 @@ struct Picture {
 const ::byte __img_ ## name ## _ ## pos ## __ [8] PROGMEM = BRACED_INIT_LIST image; \
 ::Picture name {pos, __img_ ## name ## _ ## pos ## __ }
 
-#if defined(EXT_RECENT)
+#pragma region Free Memory
 #ifdef __arm__
 // should use uinstd.h to define sbrk but Due causes a conflict
 extern "C" char* sbrk(int incr);
@@ -102,27 +111,9 @@ uint16_t free_memory() {
 	return __brkval ? &top - __brkval : &top - __malloc_heap_start;
 #endif  // __arm__
 }
-#endif // EXT_RECENT
+#pragma endregion Free Memory
 
-// Constexpr Buffer Sizes
-namespace csize {
-	constexpr uint8_t create = 15;
-	constexpr uint8_t write = 4;
-	constexpr uint8_t protocol = max(create, write);
-	constexpr uint8_t channel = 26;
-	constexpr uint8_t desc = create + 1; // Includes null
-
-#ifdef EXT_RECENT
-	constexpr uint8_t history = 64;
-	// Description Start Position
-	constexpr uint8_t start_pos = 9;
-#else // !EXT_RECENT
-	// Description Start Position
-	constexpr uint8_t start_pos = 5;
-#endif // EXT_RECENT
-}
-
-// Allocators
+// Memory Allocators
 namespace alloc {
 	// Typed Malloc
 	template<typename T>
@@ -140,18 +131,47 @@ namespace alloc {
 	}
 }
 
+// LCD Backlight Controller
+struct Backlight {
+	enum Colour : uint8_t {
+		CLEAR = 0,
+		RED = 1,
+		GREEN = 2,
+		YELLOW = 3,
+		PURPLE = 5,
+		WHITE = 7
+	};
+	Colour colour;
+	Backlight() : colour(Colour::CLEAR) {}
+	inline Backlight& operator=(const Colour colour) {
+		this->colour = colour;
+		lcd.setBacklight(colour);
+		return *this;
+	}
+} Backlight;
+
+struct Timer {
+	Timer(const uint16_t interval) : time(millis()), interval(interval) {}
+	bool active() {
+		if (millis() > time + interval) {
+			time += interval;
+			return true;
+		} return false;
+	}
+	void reset() {
+		time = millis();
+	}
+protected:
+	decltype(millis()) time;
+	uint16_t interval;
+};
+
 // State of the Display
 enum class Display : uint8_t {
 	Setup,
 	Menu,
 	ID
 };
-#ifdef EXT_SCROLL
-// State of Scroller
-enum Scroll : bool {
-	PAUSE = false, RUN = true
-};
-#endif // EXT_SCROLL
 
 template<typename T>
 struct State {
@@ -167,12 +187,49 @@ protected:
 };
 template<>
 State<Display>& State<Display>::operator=(const Type state);
+
 #ifdef EXT_SCROLL
-template<>
-State<Scroll>& State<Scroll>::operator=(const Type state);
+enum class Scroll : uint8_t {
+	PAUSE, RUN
+};
+
+class Scroller : public State<Scroll> {
+public:
+	uint8_t pos;
+	Timer timer;
+
+	Scroller() : State(Scroll::PAUSE), pos(0), timer(2000) {}
+
+	Scroller& operator=(const Type state) {
+		timer.reset();
+		if (state == value)	return *this;
+		value = state;
+		switch (value) {
+			case Type::PAUSE:
+				timer = Timer{ 2000 }; //2 second delay
+				break;
+			case Type::RUN:
+				timer = Timer{ 500 }; // 2 char/sec
+				break;
+		}
+		pos = 0;
+		return *this;
+	}
+};
 #endif // EXT_SCROLL
 
-#ifdef EXT_RECENT
+namespace Arrow {
+	PICTURE(UP, 0, (B00000, B00100, B01110, B10101, B00100, B00100, B00100, B00000));
+	PICTURE(DOWN, 1, (B00000, B00100, B00100, B00100, B10101, B01110, B00100, B00000));
+
+	inline void upload() {
+		UP.upload();
+		DOWN.upload();
+	}
+}
+
+State<Display> state(Display::Setup);
+
 struct History {
 	struct Transaction {
 		uint8_t index;
@@ -183,7 +240,7 @@ struct History {
 
 	History() : count(1), queue(alloc::m<Transaction>(1)) {
 		queue[0] = Transaction{
-			csize::channel,
+			cexpr::channels,
 			0
 		};
 	}
@@ -191,7 +248,7 @@ struct History {
 		cull();
 		uint8_t usage = 0;
 		for (uint16_t i = 0; i < count; ++i) {
-			if (queue[i].index == transaction.index && ++usage >= csize::history) {
+			if (queue[i].index == transaction.index && ++usage >= cexpr::history) {
 				memmove(queue + 1, queue, sizeof(Transaction) * i);
 				queue[0] = transaction;
 				return;
@@ -232,163 +289,180 @@ struct History {
 	}
 
 	void cull() {
-		while (free_memory() < MEMORY_CULLING)
+		while (free_memory() < cexpr::memory_cull)
 			pop();
 	}
 } history;
-#endif // EXT_RECENT
 
+struct Event {
+protected:
+	uint8_t flags;
+public:
+	enum Flag : decltype(flags) {
+		None = 0b0,
+			Head = 0b1,
+			Value = 0b10,
+			Description = 0b100,
+			All = Head | Value | Description
+	};
+
+	constexpr operator Flag() const { return static_cast<Flag>(flags); }
+	constexpr Event(const decltype(flags) flags) : flags(flags) {}
+	constexpr inline bool any() const { return flags; }
+	constexpr inline bool all() const { return flags == Flag::All; }
+	constexpr inline bool head() const { return bitRead(flags, 0); }
+	constexpr inline bool value() const { return bitRead(flags, 1); }
+	constexpr inline bool description() const { return bitRead(flags, 2); }
+};
+
+namespace Channel {
 #ifdef EXT_EEPROM
-class EEProm {
-	struct Chl {
-		uint8_t index;
-
-		const bool available() const {
-			return EEPROM.read(pos() + offset::header) == magic;
-		}
-		const uint8_t vmin() const {
-			return EEPROM.read(pos() + offset::min);
-		}
-		const uint8_t vmax() const {
-			return EEPROM.read(pos() + offset::max);
-		}
-		const uint8_t desc(char* buffer) const {
-			uint16_t idx = pos() + offset::desc;
-			for (uint8_t i = 0; i < size::desc; ++i) {
-				buffer[i] = EEPROM.read(idx + i);
+	class eeprom {
+	public:
+		static void setup() {
+			bool invalid = false;
+			constexpr uint8_t indicies[2] = { 0, size::precheck - 1 };
+			for (auto i : indicies) {
+				const uint8_t idx = offset::precheck + i;
+				if (EEPROM.read(idx) != magic) {
+					invalid = true;
+					EEPROM.update(idx, magic);
+				}
 			}
-			buffer[size::desc] = '\0';
-			return strlen(buffer);
-		}
-	protected:
-		constexpr uint16_t pos() const {
-			return EEProm::offset::header + static_cast<uint16_t>(index) * size::all;
+			if (invalid) {
+				for (uint8_t i = 1; i < size::precheck - 1; ++i) {
+					EEPROM.update(offset::precheck + i, 0);
+				}
+				for (uint8_t i = 0; i < cexpr::channels; ++i) {
+					if (EEPROM.read(pos(i) + offset::header) == magic)
+						EEPROM.update(pos(i) + offset::header, magic + 1);
+				}
+			}
 		}
 
+		static const bool available(const uint8_t index) {
+			return EEPROM.read(pos(index) + offset::header) == magic;
+		}
+		static const uint8_t boundary(const uint8_t index, const uint8_t which) {
+			return EEPROM.read(pos(index) + which);
+		}
+		static const char* desc(const uint8_t index) {
+			static char cache[16];
+			uint16_t idx = pos(index) + offset::desc;
+			for (uint8_t i = 0; i < size::desc; ++i) {
+				cache[i] = EEPROM.read(idx + i);
+			}
+			cache[size::desc] = '\0';
+			return cache;
+		}
+
+		static void create(const uint8_t index, const uint8_t min, const uint8_t max) {
+			EEPROM.update(pos(index) + offset::header, magic);
+			boundary(index, offset::min, min);
+			boundary(index, offset::max, max);
+		}
+
+		static void boundary(const uint8_t index, const uint8_t which, uint8_t val) {
+			EEPROM.update(pos(index) + which, val);
+		}
+		static void desc(uint8_t index, const char* buffer) {
+			const uint16_t idx = pos(index) + offset::desc;
+			const uint8_t length = strlen(buffer);
+			for (uint8_t i = 0; i <= length; ++i) {
+				EEPROM.update(idx + i, buffer[i]);
+			}
+		}
+
+	protected:
+		INLINE static constexpr uint16_t pos(const uint8_t index) {
+			return offset::precheck + size::precheck + static_cast<uint16_t>(index) * size::all;
+		}
+
+		static constexpr uint8_t magic = (cexpr::eeprom_size - cexpr::channels);
 		// Size of a channel in the EEPROM
 		// Header + Min + Max + Desc
 		struct size {
+			static constexpr uint8_t precheck = 6;
 			static constexpr uint8_t header = 1;
 			static constexpr uint8_t min = 1;
 			static constexpr uint8_t max = 1;
 			static constexpr uint8_t desc = 15;
 			static constexpr uint8_t all = header + min + max + desc;
 		};
+	public:
 		struct offset {
+			static constexpr uint8_t precheck = 0;
 			static constexpr uint8_t header = 0;
 			static constexpr uint8_t min = header + size::header;
 			static constexpr uint8_t max = min + size::min;
 			static constexpr uint8_t desc = max + size::max;
 		};
 	};
-	friend Chl;
-protected:
-	static constexpr uint8_t magic = (EEPROM_MAX - csize::channel);
-	struct offset {
-		// Size of the header at the start of the eeprom
-		// to check the values have been written by this program
-		static constexpr uint8_t header = 2;
-	};
-};
 
 #endif // EXT_EEPROM
 
-struct Channel {
-#ifdef EXT_RECENT
-	uint8_t avg() const {
-		return value.avg();
-	}
-	struct Value {
-		Value(const uint8_t _) {}
+	union View {
+	private:
+		struct AttrHelper { INLINE const uint8_t index() const { return reinterpret_cast<const View*>(this)->index; } };
+		struct Value : protected AttrHelper {
+			inline operator const uint16_t() const { return history.first(index()); }
+			inline Value& operator=(const uint8_t rhs) { history.append({ index(), rhs }); return *this; }
+			const uint8_t avg() const { return history.avg(index()); }
+		};
+		struct Description : protected AttrHelper {
+			inline operator const char* () const { return eeprom::desc(index()); }
+			inline Description& operator=(const char* rhs) { eeprom::desc(index(), rhs); return *this; }
+		};
+		template<uint8_t Pos>
+		struct Boundary : protected AttrHelper {
+			inline operator const uint8_t() const { return eeprom::boundary(index(), Pos); }
+			inline Boundary& operator=(const uint8_t rhs) { eeprom::boundary(index(), Pos, rhs); return *this; }
+		};
+	public:
+		View(const uint8_t channel) : index(channel) {}
+		uint8_t index;
+		Value value;
+		Description desc;
+		Boundary<eeprom::offset::min> min;
+		Boundary<eeprom::offset::max> max;
 
-		uint8_t avg() const {
-			return history.avg(index());
-		}
-		operator uint16_t() const {
-			return history.first(index());
+		INLINE const char letter() const { return index + 'A'; }
+
+		INLINE bool valid() const { return index < cexpr::channels; }
+
+		bool exists() const {
+			if (!valid())
+				return false;
+			return eeprom::available(index);
 		}
 
-		Value& operator=(const uint8_t rhs) {
-			history.append(History::Transaction{
-				index(),
-				rhs
-				});
+		inline operator const uint8_t() const { return index; }
+	};
+
+	struct Display {
+		uint8_t row;
+		View channel;
+		Event events;
+		Scroller scroll;
+
+		static Display* active(const View channel);
+
+		Display(uint8_t row, View channel) : row(row), channel(channel), events(Event::Flag::All) {}
+
+		Display& operator=(View channel) {
+			if (this->channel.index == channel.index)	return *this;
+			if (!active(this->channel))
+				scroll = Scroll::PAUSE;
+			this->channel = channel;
+			events = Event::Flag::All;
 			return *this;
 		}
-	protected:
-		INLINE uint8_t index() const { return reinterpret_cast<const Channel*>(this)->index(); }
 
-	}
-#else // !EXT_RECENT
-	uint8_t
-#endif // EXT_RECENT
-		value{ 0 };
-
-	uint8_t min = 0, max = UINT8_MAX;
-	char* desc = nullptr;
-	INLINE uint8_t index() const;
-};
-Channel channels[csize::channel];
-
-INLINE uint8_t Channel::index() const { return this - channels; }
-
-
-namespace Arrow {
-	PICTURE(UP, 0, (B00000, B00100, B01110, B10101, B00100, B00100, B00100, B00000));
-	PICTURE(DOWN, 1, (B00000, B00100, B00100, B00100, B10101, B01110, B00100, B00000));
-
-	inline void upload() {
-		UP.upload();
-		DOWN.upload();
-	}
+		INLINE bool valid() { return channel.exists(); }
+		inline void event(const Event::Flag event) { events = events | event; }
+		inline void reset() { events = Event::Flag::None; }
+	};
 }
-
-struct Timer {
-	Timer(const uint16_t interval) : time(millis()), interval(interval) {}
-	bool active() {
-		if (millis() > time + interval) {
-			time += interval;
-			return true;
-		} return false;
-	}
-	void reset() {
-		time = millis();
-	}
-	bool reactive() {
-		if (active())
-			return true;
-		reset();
-		return false;
-	}
-
-protected:
-	decltype(millis()) time;
-	uint16_t interval;
-};
-
-State<Display> state = Display::Setup;
-void setup() {
-	Serial.begin(BAUD_RATE);
-	lcd.begin(WIDTH, HEIGHT);
-
-	// Synchronisation Phase
-	lcd.setBacklight(Background::PURPLE);
-
-	Timer timer{ 1000 };
-	do {
-		if (timer.active())
-			Serial.write('Q');
-	} while (!Serial.available() || Serial.read() != 'X');
-
-	// Synchronisation Done
-	Serial.println(F(EXTENSIONS));
-	lcd.setBacklight(Background::WHITE);
-
-	Arrow::upload();
-	state = Display::Menu;
-}
-
-
 
 namespace Window {
 
@@ -405,36 +479,94 @@ namespace Window {
 		}
 	}
 
-	struct Menu {
+	struct Render {
+		static void head(Channel::Display& display, const uint8_t arrow) {
+			lcd.setCursor(0, display.row);
+			lcd.write(arrow);
+			lcd.write(display.channel.letter());
+		}
+		static void value(Channel::Display& display) {
+			lcd.setCursor(2, display.row);
+			const uint16_t val = display.channel.value;
+			if (val > UINT8_MAX) {
+				lcd.print(F("       "));
+			}
+			else {
+				single_value(val);
+				lcd.write(',');
+				single_value(display.channel.value.avg());
+			}
+		}
+		static void description(Channel::Display& display) {
+			// TODO: Scroll
+			lcd.setCursor(10, display.row);
+			const uint8_t len = strlen(display.channel.desc);
+			if (len > cexpr::lcd_width - 10)
+				lcd.print(display.channel.desc + display.scroll.pos % (len + 1));
+			else
+				lcd.print(display.channel.desc);
+			clear::current();
+		}
+		static void layout(Channel::Display& display) {
+			lcd.setCursor(9, display.row);
+			lcd.write(' ');
+		}
+	protected:
+		static void single_value(const uint8_t val) {
+			const uint8_t spaces = 2 - static_cast<uint8_t>(log10(val));
+			for (uint8_t i = 0; i < spaces; ++i) {
+				lcd.write(' ');
+			}
+			lcd.print(val);
+		}
+	};
 
-		struct Event {
-		protected:
-			const uint8_t flags;
-		public:
-			enum Flag : decltype(flags) {
-				None = 0b0,
-					Head = 0b1,
-					Value = 0b10,
-					Description = 0b100,
-					Index = 0b1000,
-					All = Head | Value | Description | Index
-			};
+	class Menu {
+		friend Channel::Display;
+		Timer selector{ 1000 };
+		Channel::Display channels[2] = { {0, UINT8_MAX}, {1, UINT8_MAX} };
 
-			constexpr operator uint8_t() const { return flags; }
-			constexpr operator Flag() const { return static_cast<Flag>(flags); }
-			constexpr Event(const decltype(flags) flags) : flags(flags) {}
-			constexpr inline bool any() const { return flags; }
-			constexpr inline bool all() const { return flags == Flag::All; }
-			constexpr inline bool head() const { return bitRead(flags, 0); }
-			constexpr inline bool value() const { return bitRead(flags, 1); }
-			constexpr inline bool description() const { return bitRead(flags, 2); }
-			constexpr inline bool indicies() const { return bitRead(flags, 3); }
-		};
+		const uint8_t find_up(uint8_t idx) {
+			for (--idx; idx < UINT8_MAX && !Channel::View(idx).exists(); --idx);
+			if (Channel::View(idx).exists())
+				return idx;
+			return UINT8_MAX;
+		}
+		const uint8_t find_down(uint8_t idx) {
+			for (++idx; idx < cexpr::channels && !Channel::View(idx).exists(); ++idx);
+			if (Channel::View(idx).exists())
+				return idx;
+			return cexpr::channels;
+		}
 
+		void render(Channel::Display& display) {
+			if (!display.events.any() || !display.valid())	return;
+
+			if (display.events.head()) {
+				Render::head(display, ((*this).*(display.row ? &find_down : &find_up))(display.channel.index) < cexpr::channels ? (display.row ? Arrow::DOWN : Arrow::UP) : ' ');
+			}
+			if (display.events.value())
+				Render::value(display);
+			if (display.events.description())
+				Render::description(display);
+			if (display.events.all())
+				Render::layout(display);
+
+			display.reset();
+		}
+	public:
 		void begin() {
-			// lcd.setBacklight(Background::WHITE);
-			dispatch(Event::Flag::All);
-			selector.reset();
+			Backlight = Backlight::Colour::WHITE;
+			for (auto& display : channels)
+				display.scroll = Scroll::PAUSE;
+			event(Event::Flag::All);
+			render();
+		}
+		void render() {
+			for (auto& display : channels) {
+				if (display.valid())
+					render(display);
+			}
 		}
 		void poll_input() {
 			const auto events = lcd.readButtons();
@@ -450,193 +582,97 @@ namespace Window {
 				selector.reset();
 			}
 
-			// Scroll Up
-			if (events & BUTTON_UP) {
-				const auto next = get_above(index[0]);
-				if (next != index[0] && next < csize::channel) {
-					index[0] = next;
-					return dispatch(Window::Menu::Event::Flag::Index);
-				}
-			}
-			// Scroll Down
-			else if (events & BUTTON_DOWN) {
-				const auto next = get_below(index[1]);
-				if (next != index[1] && next < csize::channel) {
-					index[0] = index[1];
-					return dispatch(Window::Menu::Event::Flag::Index);
+			for (auto& display : channels) {
+				if (display.scroll.timer.active()) {
+					if (display.scroll == Scroll::PAUSE)
+						display.scroll = Scroll::RUN;
+					++display.scroll.pos;
+					event(Event::Flag::Description);
+					display.scroll.timer.reset();
 				}
 			}
 
-			// TODO: If Right
-			// TODO: If Left
-
-#ifdef EXT_SCROLL
-// Scrolling
-			if (scroller.reactive()) {
-				if (scroll == Scroll::PAUSE) {
-					scroll = Scroll::RUN;
-				}
-				++scroll_pos;
-			}
-#endif // EXT_SCROLL
-		}
-
-		using Predicate = bool (*)(uint8_t);
-
-		static uint8_t get_above(uint8_t idx, Predicate predicate) {
-			for (uint8_t i = idx - 1; i < UINT8_MAX; --i) {
-				if (channels[i].desc && predicate(i))
-					return i;
-			}
-			return UINT8_MAX;
-		}
-		static uint8_t get_above(uint8_t idx) {
-			return get_above(idx, [](uint8_t) -> bool { return true; });
-		}
-
-		static uint8_t get_below(uint8_t idx, Predicate predicate) {
-			for (uint8_t i = idx + 1; i < csize::channel; ++i) {
-				if (channels[i].desc && predicate(i))
-					return i;
-			}
-			return csize::channel;
-		}
-		static uint8_t get_below(uint8_t idx) {
-			return get_below(idx, [](uint8_t) -> bool { return true; });
-		}
-
-
-		bool compute_indices(Predicate predicate) {
-			uint8_t old[2] = { index[0], index[1] };
-			if (index[0] >= csize::channel)
-				index[0] = get_below(UINT8_MAX, predicate);
-			index[1] = index[0] != csize::channel ? get_below(index[0], predicate) : csize::channel;
-			return (old[0] != index[0]) || (old[1] != index[1]);
-		}
-		bool compute_indices() {
-			return compute_indices([](uint8_t) -> bool { return true; });
-		}
-
-		void dispatch(const Event event) {
-			if (!event.any())
+			if (events & BUTTON_UP && evaluate_index(Direction::UP))
 				return;
-			if (event.indicies()) {
-#ifdef EXT_SCROLL
-				if (compute_indices() || event.all()) {
-					dispatch(Event::Flag::All ^ Event::Flag::Index);
-					scroll = Scroll::PAUSE;
-				}
-				else {
-					dispatch(Event::Flag::Head);
-				}
-#else // !EXT_SCROLL
-				dispatch(compute_indices() || event.all() ? Event::Flag::All ^ Event::Flag::Index : Event::Flag::Head);
-#endif // EXT_SCROLL
+			if (events & BUTTON_DOWN && evaluate_index(Direction::DOWN))
 				return;
+		}
+
+		enum Direction : int8_t {
+			UP = -1,
+			CONSTANT = 0,
+			DOWN = 1,
+		};
+		inline void event(const Event::Flag event) {
+			for (auto& display : channels)
+				display.event(event);
+		}
+		void headers() {
+			event(Event::Flag::Head);
+			evaluate_index(Window::Menu::Direction::CONSTANT);
+		}
+		bool evaluate_index(const Direction dir) {
+			uint8_t old[2] = { channels[0].channel.index, channels[1].channel.index };
+			if (channels[0].channel.index >= cexpr::channels)
+				if (channels[0] = find_down(UINT8_MAX); !channels[0].valid())
+					return;
+			switch (dir) {
+				case Direction::UP:
+					channels[0] = find_up(channels[0].channel.index);
+					if (channels[0].valid() && channels[0].channel != old[0]) {
+						channels[1] = old[0];
+						return true;
+					}	return false;
+				case Direction::CONSTANT:
+					channels[1] = find_down(channels[0].channel.index);
+					return channels[1].channel.index != old[1];
+				case Direction::DOWN:
+					channels[1] = find_down(channels[1].channel.index);
+					if (channels[1].valid() && channels[1].channel != old[1]) {
+						channels[0] = old[1];
+						return true;
+					}	return false;
 			}
-
-			for (uint8_t backlight = 0, row = 0; row < HEIGHT; ++row) {
-				const auto idx = index[row];
-				// If first index is invalid so is the second
-				if (idx >= csize::channel) return;
-				const auto& channel = channels[idx];
-
-				if (event.head()) {
-					lcd.setCursor(0, row);
-					render_head(row, idx);
-				}
-				if (event.value()) {
-					lcd.setCursor(2, row);
-					backlight |= render_value(channel);
-					if (row || (index[1] >= csize::channel))
-						lcd.setBacklight(backlight ? backlight : Background::WHITE);
-				}
-				if (event.description()) {
-					lcd.setCursor(csize::start_pos, row);
-					clear::current();
-					lcd.setCursor(csize::start_pos, row);
-					render_description(channel);
-				}
-			}
+			return false;
 		}
-
-		void render_head(const uint8_t row, const uint8_t idx) const {
-			lcd.write((row ? get_below(idx) : get_above(idx)) < csize::channel ? (row ? Arrow::DOWN : Arrow::UP) : ' ');
-			lcd.write(idx + 'A');
-		}
-
-		void render_single(const uint8_t value) const {
-			const uint8_t logged = 2 - static_cast<uint8_t>(log10(value));
-			for (uint8_t i = 0; i < logged; ++i)
-				lcd.write(' ');
-			lcd.print(value);
-		}
-		Background render_value(const Channel& channel) const {
-			const uint16_t value = channel.value; // Cache the value;
-			if (value > UINT8_MAX) {
-#ifdef EXT_RECENT
-				lcd.print(F("       "));
-#else // !EXT_RECENT
-				lcd.print(F("   "));
-#endif // EXT_RECENT
-				return Background::CLEAR;
-			}
-			render_single(channel.value);
-#ifdef EXT_RECENT
-			lcd.write(',');
-			render_single(channel.avg());
-#endif // EXT_RECENT
-			return (channel.value > channel.max) ? Background::RED : (channel.value < channel.min ? Background::GREEN : Background::CLEAR);
-		}
-
-		void render_description(const Channel& channel) const {
-			lcd.write(' ');
-#ifdef EXT_SCROLL
-			if (scroll_pos <= strlen(channel.desc))
-				lcd.print(channel.desc + scroll_pos);
-			clear::current();
-#else // !EXT_SCROLL
-			lcd.print(channel.desc);
-#endif // EXT_SCROLL
-		}
-	protected:
-		uint8_t index[2] = { UINT8_MAX, csize::channel };
-		Timer selector{ 1000 };
-#ifdef EXT_SCROLL
-		friend State<Scroll>;
-		State<Scroll> scroll{ Scroll::PAUSE };
-		uint8_t scroll_pos{ 0 };
-		Timer scroller{ 1500 }; // 1.5sec delay
-#endif // EXT_SCROLL
+		// GLOBAL PREDICATE TO DETERMINE OUR STATE AND CHEAT LOL XD
 	} menu;
 
 	struct ID {
 		void begin() {
-			lcd.setBacklight(Background::PURPLE);
-			ram = RAM_MAX + 1;
+			Backlight = Backlight::Colour::PURPLE;
+			ram = cexpr::ram_size + 1;
 			render();
 		}
 		void poll_input() {
-			if (!(lcd.readButtons() & BUTTON_SELECT)) {
+			if (!(lcd.readButtons() & BUTTON_SELECT))
 				state = Display::Menu;
-				return;
-			}
-			render();
 		}
 		void render() {
 			const decltype(ram) current = free_memory();
 			if (current != ram) {
+				ram = current;
 				lcd.setCursor(0, 0);
 				lcd.print(F(STUDENT_ID));
 				lcd.setCursor(0, 1);
-				lcd.print(current);
+				lcd.print(ram);
 				lcd.write('B');
 			}
 		}
 	protected:
 		uint16_t ram;
 	} id;
-} // namespace Window
+}
+
+namespace Channel {
+	Display* Display::active(const View channel) {
+		for (auto& display : Window::menu.channels) {
+			if (display.channel.index == channel.index)
+				return &display;
+		}
+		return nullptr;
+	}
+}
 
 namespace Protocol {
 	inline void exhaust_serial() {
@@ -644,29 +680,24 @@ namespace Protocol {
 			while (Serial.read() != '\n');
 	}
 
-	inline Channel* read_data(char* buffer, const uint8_t size) {
+	inline Channel::View read_data(char* buffer, const uint8_t size) {
 		const uint8_t len = Serial.readBytesUntil('\n', buffer, size);
-		const uint8_t index = (*buffer) - 'A';
-		if ((index) > csize::channel) {
-			return nullptr;
-		}
+		const uint8_t idx = *buffer - 'A';
 		buffer[0] = len - 1;
-		return &channels[index];
+		return Channel::View(idx);
 	}
 
-	inline bool create(char* buf, uint8_t& event) {
-		auto channel = read_data(buf, csize::create);
-		if (!channel) return false;
-		if (channel->desc) {
-			channel->desc = alloc::r(channel->desc, buf[0] + 1);
+	inline bool create(char* buf) {
+		auto channel = read_data(buf, cexpr::create);
+		if (!channel.valid()) {
+			buf[0] = channel.letter();
+			return false;
 		}
-		else {
-			channel->desc = alloc::m<char>(buf[0] + 1);
-		}
-		memcpy(channel->desc, buf + 1, buf[0]);
-		channel->desc[buf[0]] = '\0';
-		event |= Window::Menu::Event::Flag::Index;
-		history.cull();
+		buf[buf[0] + 1] = '\0';
+		if (!channel.exists())
+			Channel::eeprom::create(channel, 0, UINT8_MAX);
+		channel.desc = buf + 1;
+		Window::menu.headers();
 		return true;
 	}
 
@@ -686,42 +717,41 @@ namespace Protocol {
 		NOOP = '\n'
 	};
 
-	bool write(const OP op, char* buf, uint8_t& event) {
-		auto channel = read_data(buf, csize::write);
-		if (!channel) return false;
-		if (!channel->desc || !buf[0]) {
-			buf[0] = channel->index() + 'A';
+	bool write(const OP op, char* buf) {
+		auto channel = read_data(buf, cexpr::write);
+		if (!channel.exists()) return false;
+		if (!channel.desc || !buf[0]) {
+			buf[0] = channel.letter();
 			return false;
 		}
 		const auto v = convert_int(buf);
 		if (v > UINT8_MAX)	return false;
 		switch (op) {
 			case OP::VALUE:
-				channel->value = v;
-				break;
+				channel.value = v;	break;
 			case OP::MIN:
-				channel->min = v;	break;
+				channel.min = v;	break;
 			case OP::MAX:
-				channel->max = v;	break;
+				channel.max = v;	break;
 		}
-		event |= Window::Menu::Event::Flag::Value;
+		if (auto display = Channel::Display::active(channel))
+			display->event(Event::Flag::Value);
 		return true;
 	}
 
-	inline Window::Menu::Event process() {
-		uint8_t event = Window::Menu::Event::Flag::None;
+	inline void process() {
 		if (Serial.available()) {
 			bool result = false;
-			char buf[csize::protocol] = { '\0' };
+			char buf[cexpr::protocol]{ '\0' };
 			const char v = Serial.read();
 			switch (v) {
-				case OP::NOOP:	return event;
-				case OP::CREATE:	result = create(buf, event); break;
-				case OP::VALUE:	result = write(OP::VALUE, buf, event); break;
-				case OP::MAX:	result = write(OP::MAX, buf, event); break;
-				case OP::MIN:	result = write(OP::MIN, buf, event); break;
+				case OP::NOOP:		return;
+				case OP::CREATE:	result = create(buf); break;
+				case OP::VALUE:		result = write(OP::VALUE, buf); break;
+				case OP::MAX:		result = write(OP::MAX, buf); break;
+				case OP::MIN:		result = write(OP::MIN, buf); break;
 				default:
-					Serial.readBytesUntil('\n', buf, csize::protocol);
+					Serial.readBytesUntil('\n', buf, cexpr::protocol);
 			}
 			if (!result) {
 				Serial.print(F("ERROR: "));
@@ -729,11 +759,11 @@ namespace Protocol {
 				Serial.println(buf);
 			}
 			else {
-				log_debug(buf);
+				buf[0] += '0';
+				log_ddebug(v, buf);
 			}
 			exhaust_serial();
 		}
-		return event;
 	}
 } // namespace Protocol
 
@@ -749,31 +779,38 @@ State<Display>& State<Display>::operator=(const Type state) {
 			Window::id.begin(); break;
 	}	return *this;
 }
-#ifdef EXT_SCROLL
-template<>
-State<Scroll>& State<Scroll>::operator=(const Type state) {
-	if (state == value)	return *this;
-	value = state;
-	switch (value) {
-		case Type::PAUSE:
-			Window::menu.scroller = Timer{ 1500 }; //2 second delay
-			break;
-		case Type::RUN:
-			Window::menu.scroller = Timer{ 500 }; // 2 char/sec
-			break;
-	}
-	Window::menu.scroll_pos = 0;
-	return *this;
+
+void setup() {
+	Serial.begin(cexpr::baud_rate);
+	lcd.begin(cexpr::lcd_width, cexpr::lcd_height);
+
+	// Synchronisation Phase
+	Backlight = Backlight::Colour::PURPLE;
+
+	Timer timer{ 1000 };
+	do {
+		if (timer.active())
+			Serial.write('Q');
+	} while (!Serial.available() || Serial.read() != 'X');
+
+	// Synchronisation Done
+	Serial.println(F(EXTENSIONS));
+	Backlight = Backlight::Colour::WHITE;
+
+	Arrow::upload();
+	Channel::eeprom::setup();
+	Window::menu.evaluate_index(Window::Menu::Direction::CONSTANT);
+	state = Display::Menu;
 }
-#endif // EXT_SCROLL
 
 void loop() {
-	const auto event = Protocol::process();
+	Protocol::process();
 	switch (state) {
 		case Display::Menu:
 			Window::menu.poll_input();
-			return Window::menu.dispatch(event);
+			return Window::menu.render();
 		case Display::ID:
-			return Window::id.poll_input();
+			Window::id.poll_input();
+			return Window::id.render();
 	}
 }
