@@ -543,6 +543,7 @@ namespace Window {
 			UP = -1,
 			CONSTANT = 0,
 			DOWN = 1,
+			PREDICATE = 2,
 		};
 	protected:
 		friend Channel::Display;
@@ -613,6 +614,12 @@ namespace Window {
 						channels[1] = next;
 						return true;
 					}	return false;
+
+				case Direction::PREDICATE:
+					if (!evaluate_index(Direction::UP, previous))
+						channels[0] = find_down(UINT8_MAX);
+					evaluate_index(Direction::CONSTANT, previous);
+					return true;
 			}
 			return false;
 		}
@@ -701,15 +708,8 @@ namespace Window {
 	Menu::PredicateState& Menu::PredicateState::operator=(const Type state) {
 		if (state == value)	return *this;
 		value = state;
-		menu.channels[1] = cexpr::channels;
-		if (value != Predicate::all) {
-			if (!value(menu.channels[0].channel) && !menu.evaluate_index(Direction::UP))
-				menu.channels[0] = cexpr::channels;
-			menu.evaluate_index(Direction::CONSTANT);
-		}
-		else
-			menu.evaluate_index(Direction::CONSTANT);
-		menu.event(Event::Flag::All);
+		menu.evaluate_index(value == Predicate::all ? Direction::CONSTANT : Direction::PREDICATE);
+		menu.event(Event::Flag::Head);
 	}
 
 	struct ID {
