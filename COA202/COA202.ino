@@ -592,6 +592,7 @@ namespace Window {
 				display.scroll = Scroll::PAUSE;
 			event(Event::Flag::All);
 			render();
+			selector.reset();
 		}
 		void render() {
 			for (auto& display : channels) {
