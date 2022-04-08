@@ -8,16 +8,14 @@ Adafruit_RGBLCDShield lcd;
 // #define DEBUG
 #define STUDENT_ID "F121584"
 
-// Extensions
-#define EXT_HCI
-
 // Constants
 namespace cexpr {
 	constexpr uint16_t baud_rate = 9600;
 	constexpr uint8_t lcd_width = 16;
 	constexpr uint8_t lcd_height = 2;
 
-	constexpr uint16_t ram_size = 2048;
+	// Maximum Potential RAM of the Board
+	constexpr uint16_t ram_size = RAMEND - RAMSTART;
 	constexpr uint16_t eeprom_size = E2END + 1;
 	// Amount of Free Ram left to begin culling dynamic memory
 	// Such that the stack does not become corrupted
@@ -644,7 +642,7 @@ namespace Window {
 				Backlight = bl == Backlight::Colour::CLEAR ? Backlight::Colour::WHITE : bl;
 			}
 		}
-		void poll_input() {
+		bool poll_input() {
 			uint8_t last_input = this->last_input;
 			const auto events = lcd.readButtons();
 			this->last_input = events;
@@ -653,7 +651,7 @@ namespace Window {
 			if (events & BUTTON_SELECT) {
 				if (selector.active()) {
 					state = Display::ID;
-					return;
+					return false;
 				}
 			}
 			else {
@@ -671,9 +669,9 @@ namespace Window {
 			}
 
 			if (events & BUTTON_UP && evaluate_index(Direction::UP))
-				return;
+				return true;
 			if (events & BUTTON_DOWN && evaluate_index(Direction::DOWN))
-				return;
+				return true;
 
 			if (last_input & BUTTON_LEFT && !(events & BUTTON_LEFT)) {
 				if (predicate == Predicate::all)
@@ -687,6 +685,7 @@ namespace Window {
 				else if (predicate == Predicate::maximum)
 					predicate = Predicate::all;
 			}
+			return true;
 		}
 		inline void event(const Event::Flag event) {
 			for (auto& display : channels)
@@ -884,8 +883,9 @@ void loop() {
 	Protocol::process();
 	switch (state) {
 		case Display::Menu:
-			Window::menu.poll_input();
-			return Window::menu.render();
+			if (Window::menu.poll_input())
+				Window::menu.render();
+			return;
 		case Display::ID:
 			Window::id.poll_input();
 			return Window::id.render();
