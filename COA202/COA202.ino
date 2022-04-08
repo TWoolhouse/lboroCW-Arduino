@@ -5,7 +5,7 @@
 
 Adafruit_RGBLCDShield lcd;
 
-#define DEBUG
+// #define DEBUG
 #define STUDENT_ID "F121584"
 
 // Extensions
@@ -411,7 +411,7 @@ namespace Channel {
 			inline Boundary& operator=(const uint8_t rhs) { eeprom::boundary(index(), Pos, rhs); return *this; }
 		};
 	public:
-		View(const uint8_t channel) : index(channel) {}
+		constexpr View(const uint8_t channel) : index(channel) {}
 		uint8_t index;
 		Value value;
 		Description desc;
@@ -429,6 +429,21 @@ namespace Channel {
 		}
 
 		inline operator const uint8_t() const { return index; }
+
+		const Backlight::Colour backlight() const {
+			const uint16_t val = value;
+			if (valid() && val <= UINT8_MAX)
+				return (val > max ? Backlight::Colour::RED : (val < min ? Backlight::Colour::GREEN : Backlight::Colour::CLEAR));
+			return Backlight::Colour::CLEAR;
+		}
+
+		void log() const {
+			log_ddebug(letter(), desc);
+			log_ddebug(F("Value"), value);
+			log_ddebug(F("Min"), min);
+			log_ddebug(F("Max"), max);
+		}
+
 	};
 
 	struct Display {
@@ -496,6 +511,7 @@ namespace Window {
 				lcd.write(',');
 				single_value(display.channel.value.avg());
 			}
+
 		}
 		static void description(Channel::Display& display) {
 			// TODO: Scroll
@@ -532,22 +548,38 @@ namespace Window {
 		friend Channel::Display;
 		Timer selector{ 1000 };
 		Channel::Display channels[cexpr::lcd_height] = { {0, UINT8_MAX}, {1, UINT8_MAX} };
+		uint8_t last_input = 0;
+
+		struct Predicate {
+			using Func = bool(*)(const Channel::View channel);
+			static constexpr bool all(const Channel::View) { return true; }
+			static bool maximum(const Channel::View channel) { return channel.value <= UINT8_MAX && channel.value > channel.max; } // TODO: Implement predicate
+			static bool minimum(const Channel::View channel) { return channel.value <= UINT8_MAX && channel.value < channel.min; } // TODO: Implement predicate
+		};
+		struct PredicateState : public State<Predicate::Func> {
+			using State::State; // Inherit Constructor
+			PredicateState& operator=(const Type state);
+		} predicate{ Predicate::all };
 
 		const uint8_t find_up(uint8_t idx) {
-			for (--idx; idx < UINT8_MAX && !Channel::View(idx).exists(); --idx);
+			for (--idx; idx < UINT8_MAX && !(Channel::View(idx).exists() && predicate(idx)); --idx);
 			if (Channel::View(idx).exists())
 				return idx;
 			return UINT8_MAX;
 		}
 		const uint8_t find_down(uint8_t idx) {
-			for (++idx; idx < cexpr::channels && !Channel::View(idx).exists(); ++idx);
+			for (++idx; idx < cexpr::channels && !(Channel::View(idx).exists() && predicate(idx)); ++idx);
 			if (Channel::View(idx).exists())
 				return idx;
 			return cexpr::channels;
 		}
 
-		void render(Channel::Display& display) {
-			if (!display.events.any() || !display.valid())	return;
+		bool render(Channel::Display& display) {
+			if (!display.events.any()) return;
+			if (!display.valid()) {
+				clear::line(display.row);
+				return false;
+			}
 
 			if (display.events.head()) {
 				Render::head(display, ((*this).*(display.row ? &find_down : &find_up))(display.channel.index) < cexpr::channels ? (display.row ? Arrow::DOWN : Arrow::UP) : ' ');
@@ -559,14 +591,14 @@ namespace Window {
 			if (display.events.all())
 				Render::layout(display);
 
-			display.reset();
+			return display.events.value();
 		}
 
 		bool evaluate_index(const Direction dir, Channel::Display(&previous)[cexpr::lcd_height]) {
 			switch (dir) {
 				case Direction::UP:
-					channels[0] = find_up(channels[0].channel);
-					if (channels[0].valid() && channels[0].channel != previous[0].channel) {
+					if (const auto next = find_up(channels[0].channel); Channel::View(next).valid()) {
+						channels[0] = next;
 						channels[1] = previous[0];
 						return true;
 					}	return false;
@@ -576,9 +608,9 @@ namespace Window {
 					return channels[1].channel != previous[1].channel;
 
 				case Direction::DOWN:
-					channels[1] = find_down(channels[1].channel);
-					if (channels[1].valid() && channels[1].channel != previous[1].channel) {
+					if (const auto next = find_down(channels[1].channel); Channel::View(next).valid()) {
 						channels[0] = previous[1];
+						channels[1] = next;
 						return true;
 					}	return false;
 			}
@@ -595,13 +627,20 @@ namespace Window {
 			selector.reset();
 		}
 		void render() {
+			bool backlight = false;
 			for (auto& display : channels) {
-				if (display.valid())
-					render(display);
+				backlight = render(display);
+				display.reset();
+			}
+			if (backlight) {
+				Backlight::Colour bl = channels[0].channel.backlight() | channels[1].channel.backlight();
+				Backlight = bl == Backlight::Colour::CLEAR ? Backlight::Colour::WHITE : bl;
 			}
 		}
 		void poll_input() {
+			uint8_t last_input = this->last_input;
 			const auto events = lcd.readButtons();
+			this->last_input = events;
 
 			// Change to ID Mode
 			if (events & BUTTON_SELECT) {
@@ -628,6 +667,19 @@ namespace Window {
 				return;
 			if (events & BUTTON_DOWN && evaluate_index(Direction::DOWN))
 				return;
+
+			if (last_input & BUTTON_LEFT && !(events & BUTTON_LEFT)) {
+				if (predicate == Predicate::all)
+					predicate = Predicate::minimum;
+				else if (predicate == Predicate::minimum)
+					predicate = Predicate::all;
+			}
+			if (last_input & BUTTON_RIGHT && !(events & BUTTON_RIGHT)) {
+				if (predicate == Predicate::all)
+					predicate = Predicate::maximum;
+				else if (predicate == Predicate::maximum)
+					predicate = Predicate::all;
+			}
 		}
 		inline void event(const Event::Flag event) {
 			for (auto& display : channels)
@@ -645,8 +697,20 @@ namespace Window {
 			memcpy(&old, &channels, sizeof(old));
 			return evaluate_index(dir, old);
 		}
-		// GLOBAL PREDICATE TO DETERMINE OUR STATE AND CHEAT LOL XD
 	} menu;
+	Menu::PredicateState& Menu::PredicateState::operator=(const Type state) {
+		if (state == value)	return *this;
+		value = state;
+		menu.channels[1] = cexpr::channels;
+		if (value != Predicate::all) {
+			if (!value(menu.channels[0].channel) && !menu.evaluate_index(Direction::UP))
+				menu.channels[0] = cexpr::channels;
+			menu.evaluate_index(Direction::CONSTANT);
+		}
+		else
+			menu.evaluate_index(Direction::CONSTANT);
+		menu.event(Event::Flag::All);
+	}
 
 	struct ID {
 		void begin() {
@@ -691,7 +755,7 @@ namespace Protocol {
 	}
 
 	inline Channel::View read_data(char* buffer, const uint8_t size) {
-		const uint8_t len = Serial.readBytesUntil('\n', buffer, size);
+		const uint8_t len = Serial.readBytesUntil('\n', buffer, size + 1); // Plus 1 for the channel
 		const uint8_t idx = *buffer - 'A';
 		buffer[0] = len - 1;
 		return Channel::View(idx);
@@ -746,6 +810,9 @@ namespace Protocol {
 		}
 		if (auto display = Channel::Display::active(channel))
 			display->event(Event::Flag::Value);
+
+		Window::menu.evaluate_index(Window::Menu::Direction::CONSTANT);
+		channel.log();
 		return true;
 	}
 
