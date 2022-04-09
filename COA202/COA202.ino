@@ -1,7 +1,5 @@
-#include <Wire.h>
-#include <Adafruit_RGBLCDShield.h>
-#include <utility/Adafruit_MCP23017.h>
 #include <EEPROM.h>
+#include <Adafruit_RGBLCDShield.h>
 
 Adafruit_RGBLCDShield lcd;
 
@@ -10,27 +8,44 @@ Adafruit_RGBLCDShield lcd;
 
 // Constants
 namespace cexpr {
+	// Serial Baud Rate
 	constexpr uint16_t baud_rate = 9600;
+	// LCD Width & Height
 	constexpr uint8_t lcd_width = 16;
 	constexpr uint8_t lcd_height = 2;
 
 	// Maximum Potential RAM of the Board
-	constexpr uint16_t ram_size = RAMEND - RAMSTART;
-	constexpr uint16_t eeprom_size = E2END + 1;
+	constexpr uint16_t ram_size =
+#if defined(RAMEND) && defined(RAMSTART)
+		// In case for somereason these don't exist
+		RAMEND - RAMSTART
+#else
+		// Just use a really large number
+		UINT16_MAX - 1
+#endif
+		;
 	// Amount of Free Ram left to begin culling dynamic memory
 	// Such that the stack does not become corrupted
-	constexpr uint16_t memory_cull = 512;
+	constexpr uint16_t memory_cull = 200;
 
-	constexpr uint8_t desc = 16; // Includes null
+	// Length of Descriptions including null
+	constexpr uint8_t desc = 16;
+	// Create protocol buffer size requirement
 	constexpr uint8_t create = desc - 1;
+	// Write protocol buffer size requirement
 	constexpr uint8_t write = 3;
+	// Largest potential protocol buffer size requirement
 	constexpr uint8_t protocol = max(desc, write) + 1;
+	// Maximum number of channels
 	constexpr uint8_t channels = 26;
+	// Maximum values per channel to keep in history
+	// Includes the current value as well
 	constexpr uint8_t history = 64;
 }
 #define EXTENSIONS "UDCHARS,FREERAM,HCI,EEPROM,RECENT,NAMES,SCROLL"
 
 // Debug Output
+#pragma region Debug Output
 #ifdef DEBUG
 #define log_debug(message) { \
 Serial.print(F("DEBUG: ")); \
@@ -60,6 +75,7 @@ Serial.println(value); \
 #define log_debug(message)
 #define log_ddebug(message, value)
 #endif // DEBUG
+#pragma endregion Debug Output
 
 // Helper Macros
 #define BRACED_INIT_LIST(...) { __VA_ARGS__ }
@@ -74,11 +90,15 @@ Serial.println(value); \
 #endif // Force Inline
 
 // Custom Character Pictures
+#pragma region UDChars
 struct Picture {
 	const uint8_t pos;
 	const byte* const img;
 	Picture(const uint8_t pos, const byte* const img) : pos(pos), img(img) {}
+
+	// Uploads image data from the Flash memory to the LCD
 	void upload() {
+		// Copy the data from progmem into a temporary buffer then send it to the lcd.
 		byte buf[8];
 		memcpy_P(buf, img, sizeof(buf));
 		lcd.createChar(pos, buf);
@@ -87,9 +107,11 @@ struct Picture {
 		return pos;
 	}
 };
+// Instantiate picture object from raw data array
 #define PICTURE(name, pos, image) \
 const ::byte __img_ ## name ## _ ## pos ## __ [8] PROGMEM = BRACED_INIT_LIST image; \
 ::Picture name {pos, __img_ ## name ## _ ## pos ## __ }
+#pragma endregion UDChars
 
 #pragma region Free Memory
 #ifdef __arm__
@@ -124,8 +146,8 @@ namespace alloc {
 	INLINE T* r(T* ptr, const uint16_t size) {
 		return reinterpret_cast<T*>(realloc(ptr, sizeof(T) * size));
 	}
-	// Free for the sake of completeness
 	INLINE void f(void* ptr) {
+		// Free for the sake of completeness
 		return free(ptr);
 	}
 }
@@ -165,13 +187,7 @@ protected:
 	uint16_t interval;
 };
 
-// State of the Display
-enum class Display : uint8_t {
-	Setup,
-	Menu,
-	ID
-};
-
+// State Controller
 template<typename T>
 struct State {
 	using Type = T;
@@ -184,13 +200,25 @@ struct State {
 protected:
 	Type value;
 };
-template<>
-State<Display>& State<Display>::operator=(const Type state);
 
+// State of the Display
+#pragma region State Display
+enum class Display : uint8_t {
+	Setup,
+	Menu,
+	ID
+};
+template<> State<Display>& State<Display>::operator=(const Type state);
+State<Display> state{ Display::Setup };
+#pragma endregion State Display
+
+#pragma region State Scroll
+// Scrolling of Description Text
+// Text should stay frozen in place for 1.5sec before it begins to scroll @ 2 char/sec
 enum class Scroll : uint8_t {
 	PAUSE, RUN
 };
-
+// State Controller for scrolling of description text
 class Scroller : public State<Scroll> {
 public:
 	uint8_t pos;
@@ -214,38 +242,50 @@ public:
 		return *this;
 	}
 };
+#pragma endregion State Scroll
 
+// Custom Arrows
 namespace Arrow {
 	PICTURE(UP, 0, (B00000, B00100, B01110, B10101, B00100, B00100, B00100, B00000));
 	PICTURE(DOWN, 1, (B00000, B00100, B00100, B00100, B10101, B01110, B00100, B00000));
 
+	// Uploads all Arrows to the LCD
 	inline void upload() {
 		UP.upload();
 		DOWN.upload();
 	}
 }
 
-State<Display> state(Display::Setup);
-
+// History manages all new values entered to provide avg as well as removing the old values in accordance to memory culling
+// Values are managed in a variable length queue which manages its own size using the current ram usage of the entire program
 struct History {
+	// A single record
 	struct Transaction {
-		uint8_t index;
+		uint8_t index; // Channel Index
 		uint8_t value;
 	};
-	uint16_t count;
+	uint16_t count; // Length of the queue
 	Transaction* queue;
 
+	// Creates a queue of size 1 with a transaction referencing an invalid channel
 	History() : count(1), queue(alloc::m<Transaction>(1)) {
 		queue[0] = Transaction{
 			cexpr::channels,
 			0
 		};
 	}
+	// Appends a new transaction to the queue and culls the queue if necessary
 	void append(const Transaction transaction) {
+		// Technically it's prepending the transactions as the queue is implemented backwards where
+		// the most recent transactions are at the front of memory and the oldest get push to the end
+
 		cull();
-		uint8_t usage = 0;
+		uint8_t usage = 0; // Number of transaction for this channel
 		for (uint16_t i = 0; i < count; ++i) {
 			if (queue[i].index == transaction.index && ++usage >= cexpr::history) {
+				// Shift everything up to last element with this channel index in the queue by one,
+				// leaving a new empty space at the start
+				// Inserts the new transaction at the start
 				memmove(queue + 1, queue, sizeof(Transaction) * i);
 				queue[0] = transaction;
 				return;
@@ -263,9 +303,11 @@ struct History {
 		memmove(queue + 1, queue, sizeof(Transaction) * (count - 1));
 		queue[0] = transaction;
 	}
+	// Reduce the queue size by 1
 	void pop() {
 		queue = alloc::r(queue, --count);
 	}
+	// Find the first transaction belonging to a specfic channel
 	uint16_t first(const uint8_t index) const {
 		for (uint16_t i = 0; i < count; ++i) {
 			if (queue[i].index == index)
@@ -273,6 +315,7 @@ struct History {
 		}
 		return UINT16_MAX;
 	}
+	// Calculate the average for a specific channel
 	uint8_t avg(const uint8_t index) const {
 		uint16_t total = 0;
 		uint8_t found = 0;
@@ -285,12 +328,14 @@ struct History {
 		return round(total / static_cast<float>(found));
 	}
 
+	// Reduces the size of the queue until free ram is above an acceptible limit
 	void cull() {
 		while (free_memory() < cexpr::memory_cull)
 			pop();
 	}
 } history;
 
+// Rendering Events Bit Mask
 struct Event {
 protected:
 	uint8_t flags;
@@ -313,8 +358,11 @@ public:
 };
 
 namespace Channel {
+
+	// EEProm Controller
 	class eeprom {
 	public:
+		// Ensures the eeprom is in a valid state for the program to use
 		static void setup() {
 			bool invalid = false;
 			for (uint8_t i = 0; i < size::precheck; ++i) {
@@ -325,6 +373,7 @@ namespace Channel {
 				}
 			}
 			if (invalid) {
+				// Invalidates all channel headers
 				for (uint8_t i = 0; i < cexpr::channels; ++i) {
 					if (EEPROM.read(pos(i) + offset::header) == magic)
 						EEPROM.update(pos(i) + offset::header, magic + 1);
@@ -332,12 +381,15 @@ namespace Channel {
 			}
 		}
 
+		// Is the channel in the eeprom
 		static const bool available(const uint8_t index) {
 			return EEPROM.read(pos(index) + offset::header) == magic;
 		}
+		// Returns one of the value boundaries (min / max)
 		static const uint8_t boundary(const uint8_t index, const uint8_t which) {
 			return EEPROM.read(pos(index) + which);
 		}
+		// Returns description - null terminated
 		static const char* desc(const uint8_t index) {
 			static char cache[cexpr::desc];
 			uint16_t idx = pos(index) + offset::desc;
@@ -348,15 +400,18 @@ namespace Channel {
 			return cache;
 		}
 
+		// Sets the header for a new channel
 		static void create(const uint8_t index, const uint8_t min, const uint8_t max) {
 			EEPROM.update(pos(index) + offset::header, magic);
 			boundary(index, offset::min, min);
 			boundary(index, offset::max, max);
 		}
 
+		// Sets one of the boundaries
 		static void boundary(const uint8_t index, const uint8_t which, uint8_t val) {
 			EEPROM.update(pos(index) + which, val);
 		}
+		// Sets the description
 		static void desc(uint8_t index, const char* buffer) {
 			const uint16_t idx = pos(index) + offset::desc;
 			const uint8_t length = min(strlen(buffer), size::desc);
@@ -366,19 +421,20 @@ namespace Channel {
 		}
 
 	protected:
+		// Position in the eeprom of the start of a channel
 		INLINE static constexpr uint16_t pos(const uint8_t index) {
 			return offset::precheck + size::precheck + static_cast<uint16_t>(index) * size::all;
 		}
 
-		static constexpr uint8_t magic = (cexpr::eeprom_size - cexpr::channels);
+		static constexpr uint8_t magic = 137;
 		// Size of a channel in the EEPROM
 		// Header + Min + Max + Desc
 		struct size {
-			static constexpr uint8_t precheck = 2;
-			static constexpr uint8_t header = 1;
+			static constexpr uint8_t precheck = 2; // Size of the magic header at the start of the eeprom
+			static constexpr uint8_t header = 1; // Size of the magic header ar the start of each channel block
 			static constexpr uint8_t min = 1;
 			static constexpr uint8_t max = 1;
-			static constexpr uint8_t desc = cexpr::desc - 1;
+			static constexpr uint8_t desc = cexpr::desc - 1; // eeprom doesn't need to store the null for max length strings
 			static constexpr uint8_t all = header + min + max + desc;
 		};
 	public:
@@ -391,18 +447,30 @@ namespace Channel {
 		};
 	};
 
+	// Channel as represented by a view into the eeprom
+	// Occupies 1 byte on the stack as it's equivalent to a uint8_t
 	union View {
 	private:
+		// Helper class to allow all subclasses to access the parent View
+		// It's really dodgy as it assumes the class is the first attribute in the class
+		// Hence the View is required to be a union so all attributes are squished togeather
 		struct AttrHelper { INLINE const uint8_t index() const { return reinterpret_cast<const View*>(this)->index; } };
+
+		// The attributes below use c++ operator overloading to overload the assignment operator
+		// So instead of assigning to a variable in memory, it executes a function instead
+
+		// Value attribute interacts with the histroy manager
 		struct Value : protected AttrHelper {
 			inline operator const uint16_t() const { return history.first(index()); }
 			inline Value& operator=(const uint8_t rhs) { history.append({ index(), rhs }); return *this; }
 			const uint8_t avg() const { return history.avg(index()); }
 		};
+		// Description attribute interacts with the eeprom
 		struct Description : protected AttrHelper {
 			inline operator const char* () const { return eeprom::desc(index()); }
 			inline Description& operator=(const char* rhs) { eeprom::desc(index(), rhs); return *this; }
 		};
+		// Boundary attribute interacts with the eeprom
 		template<uint8_t Pos>
 		struct Boundary : protected AttrHelper {
 			inline operator const uint8_t() const { return eeprom::boundary(index(), Pos); }
@@ -416,18 +484,19 @@ namespace Channel {
 		Boundary<eeprom::offset::min> min;
 		Boundary<eeprom::offset::max> max;
 
+		inline operator const uint8_t() const { return index; }
 		INLINE const char letter() const { return index + 'A'; }
 
+		// Is the index is valid
 		INLINE bool valid() const { return index < cexpr::channels; }
-
+		// Is the channel found in the eeprom
 		bool exists() const {
 			if (!valid())
 				return false;
 			return eeprom::available(index);
 		}
 
-		inline operator const uint8_t() const { return index; }
-
+		// The background colour based on the current value
 		const Backlight::Colour backlight() const {
 			const uint16_t val = value;
 			if (valid() && val <= UINT8_MAX)
@@ -436,6 +505,7 @@ namespace Channel {
 		}
 
 		void log() const {
+			// Compiler should optimise the entire function away when not debugging
 			log_ddebug(letter(), desc);
 			log_ddebug(F("Value"), value);
 			log_ddebug(F("Min"), min);
@@ -444,17 +514,21 @@ namespace Channel {
 
 	};
 
+	// Represents a channel on the LCD display
 	struct Display {
 		uint8_t row;
 		View channel;
 		Event events;
 		Scroller scroll;
 
+		// Return the display if it is currently rendered on screen
 		static Display* active(const View channel);
 
+		// Default constructor makes a completely invalid Display
 		Display() : row(2), channel(cexpr::channels), events(Event::Flag::All), scroll() {}
 		Display(uint8_t row, View channel) : row(row), channel(channel), events(Event::Flag::All), scroll() {}
 
+		// TODO: Describe the assignment operators
 		Display& operator=(View channel) {
 			if (this->channel.index == channel.index)	return *this;
 			if (!active(channel))
@@ -501,7 +575,7 @@ namespace Window {
 		static void value(Channel::Display& display) {
 			lcd.setCursor(2, display.row);
 			const uint16_t val = display.channel.value;
-			if (val > UINT8_MAX) {
+			if (val > UINT8_MAX) { // A value does not exist if its above a uint8_t
 				lcd.print(F("       "));
 			}
 			else {
@@ -512,10 +586,9 @@ namespace Window {
 
 		}
 		static void description(Channel::Display& display) {
-			// TODO: Scroll
 			lcd.setCursor(10, display.row);
 			const uint8_t len = strlen(display.channel.desc);
-			if (len > cexpr::lcd_width - 10)
+			if (len > cexpr::lcd_width - 10) // Only scroll if the text is too long
 				lcd.print(display.channel.desc + display.scroll.pos % (len + 1));
 			else
 				lcd.print(display.channel.desc);
@@ -523,10 +596,13 @@ namespace Window {
 		}
 		static void layout(Channel::Display& display) {
 			lcd.setCursor(9, display.row);
+			// This space only needs to be drawn once not on every scroll
 			lcd.write(' ');
 		}
 	protected:
 		static void single_value(const uint8_t val) {
+			// Right aligns the value by computing log10 of the value
+			// log10 will return number of digits - 1
 			const uint8_t spaces = 2 - static_cast<uint8_t>(log10(val));
 			for (uint8_t i = 0; i < spaces; ++i) {
 				lcd.write(' ');
@@ -537,23 +613,25 @@ namespace Window {
 
 	class Menu {
 	public:
+		// Direction to find the next index
 		enum Direction : int8_t {
 			UP = -1,
 			CONSTANT = 0,
 			DOWN = 1,
-			PREDICATE = 2,
+			PREDICATE = 2, // Special algorithm when changing predicate
 		};
 	protected:
 		friend Channel::Display;
-		Timer selector{ 1000 };
+		Timer selector{ 1000 }; // 1sec Time required before switching to the ID screen
 		Channel::Display channels[cexpr::lcd_height] = { {0, UINT8_MAX}, {1, UINT8_MAX} };
-		uint8_t last_input = 0;
+		uint8_t last_input = 0; // Events of the last frame
 
+		// Determines if the channel can be shown in the current display mode
 		struct Predicate {
 			using Func = bool(*)(const Channel::View channel);
 			static constexpr bool all(const Channel::View) { return true; }
-			static bool maximum(const Channel::View channel) { return channel.value <= UINT8_MAX && channel.value > channel.max; } // TODO: Implement predicate
-			static bool minimum(const Channel::View channel) { return channel.value <= UINT8_MAX && channel.value < channel.min; } // TODO: Implement predicate
+			static bool maximum(const Channel::View channel) { return channel.value <= UINT8_MAX && channel.value > channel.max; }
+			static bool minimum(const Channel::View channel) { return channel.value <= UINT8_MAX && channel.value < channel.min; }
 		};
 		struct PredicateState : public State<Predicate::Func> {
 			using State::State; // Inherit Constructor
