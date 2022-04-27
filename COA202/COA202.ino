@@ -79,7 +79,6 @@ Serial.println(value); \
 
 // Helper Macros
 #define BRACED_INIT_LIST(...) { __VA_ARGS__ }
-#define sizeof_arr(arr, type) (sizeof(arr) / sizeof(type))
 
 #if defined(_MSC_VER) // Force Inline
 #define INLINE inline __forceinline
@@ -633,17 +632,20 @@ namespace Window {
 			static bool maximum(const Channel::View channel) { return channel.value <= UINT8_MAX && channel.value > channel.max; }
 			static bool minimum(const Channel::View channel) { return channel.value <= UINT8_MAX && channel.value < channel.min; }
 		};
+		// The predicate function ptr is the state
 		struct PredicateState : public State<Predicate::Func> {
 			using State::State; // Inherit Constructor
 			PredicateState& operator=(const Type state);
 		} predicate{ Predicate::all };
 
+		// Find the next valid channel index above the input according to the predicate
 		const uint8_t find_up(uint8_t idx) {
 			for (--idx; idx < UINT8_MAX && !(Channel::View(idx).exists() && predicate(idx)); --idx);
 			if (Channel::View(idx).exists())
 				return idx;
 			return UINT8_MAX;
 		}
+		// Find the next valid channel index below the input according to the predicate
 		const uint8_t find_down(uint8_t idx) {
 			for (++idx; idx < cexpr::channels && !(Channel::View(idx).exists() && predicate(idx)); ++idx);
 			if (Channel::View(idx).exists())
@@ -651,6 +653,7 @@ namespace Window {
 			return cexpr::channels;
 		}
 
+		// Render a single channel
 		bool render(Channel::Display& display) {
 			if (!display.events.any()) return;
 			if (!display.valid()) {
@@ -659,18 +662,19 @@ namespace Window {
 			}
 
 			if (display.events.head()) {
+				// Function ptr to pick checking up or down, to determine which arrow to render, if any
 				Render::head(display, ((*this).*(display.row ? &find_down : &find_up))(display.channel.index) < cexpr::channels ? (display.row ? Arrow::DOWN : Arrow::UP) : ' ');
 			}
 			if (display.events.value())
 				Render::value(display);
 			if (display.events.description())
 				Render::description(display);
-			if (display.events.all())
-				Render::layout(display);
 
+			// Return if the backlight might need changing
 			return display.events.value();
 		}
 
+		// Edits the current channel indices to render
 		bool evaluate_index(const Direction dir, Channel::Display(&previous)[cexpr::lcd_height]) {
 			switch (dir) {
 				case Direction::UP:
@@ -701,19 +705,32 @@ namespace Window {
 		}
 
 	public:
+		// Begin rendering & set the scene up
 		void begin() {
 			Backlight = Backlight::Colour::WHITE;
-			for (auto& display : channels)
+			for (auto& display : channels) {
 				display.scroll = Scroll::PAUSE;
-			event(Event::Flag::All);
+				Render::layout(display);
+				display.event(Event::Flag::All);
+			}
 			render();
 			selector.reset();
 		}
+		// Render the display channels and set the backlight
 		void render() {
 			bool backlight = false;
 			for (auto& display : channels) {
+				// Move Scrolling Forward
+				if (display.scroll.timer.active()) {
+					if (display.scroll == Scroll::PAUSE)
+						display.scroll = Scroll::RUN;
+					++display.scroll.pos;
+					display.event(Event::Flag::Description);
+					display.scroll.timer.reset();
+				}
+				// Render to the screen
 				backlight = render(display);
-				display.reset();
+				display.reset(); // Empty events
 			}
 			if (backlight) {
 				Backlight::Colour bl = channels[0].channel.backlight() | channels[1].channel.backlight();
@@ -736,21 +753,13 @@ namespace Window {
 				selector.reset();
 			}
 
-			for (auto& display : channels) {
-				if (display.scroll.timer.active()) {
-					if (display.scroll == Scroll::PAUSE)
-						display.scroll = Scroll::RUN;
-					++display.scroll.pos;
-					event(Event::Flag::Description);
-					display.scroll.timer.reset();
-				}
-			}
-
+			// Scroll the display vertically
 			if (events & BUTTON_UP && evaluate_index(Direction::UP))
 				return true;
 			if (events & BUTTON_DOWN && evaluate_index(Direction::DOWN))
 				return true;
 
+			// Change HCI Modes
 			if (last_input & BUTTON_LEFT && !(events & BUTTON_LEFT)) {
 				if (predicate == Predicate::all)
 					predicate = Predicate::minimum;
@@ -765,14 +774,17 @@ namespace Window {
 			}
 			return true;
 		}
+		//Add an event to all display channels
 		inline void event(const Event::Flag event) {
 			for (auto& display : channels)
 				display.event(event);
 		}
+		// Update the headers
 		void headers() {
 			event(Event::Flag::Head);
 			evaluate_index(Window::Menu::Direction::CONSTANT);
 		}
+		// Edits the current channel indices to render
 		bool evaluate_index(const Direction dir) {
 			if (channels[0].channel >= cexpr::channels)
 				if (channels[0] = find_down(UINT8_MAX); !channels[0].valid())
@@ -792,6 +804,7 @@ namespace Window {
 	struct ID {
 		void begin() {
 			Backlight = Backlight::Colour::PURPLE;
+			// Ensure the frame is rendered
 			ram = cexpr::ram_size + 1;
 			render();
 		}
@@ -801,14 +814,14 @@ namespace Window {
 		}
 		void render() {
 			const decltype(ram) current = free_memory();
-			if (current != ram) {
-				ram = current;
-				lcd.setCursor(0, 0);
-				lcd.print(F(STUDENT_ID));
-				lcd.setCursor(0, 1);
-				lcd.print(ram);
-				lcd.write('B');
-			}
+			if (current == ram)	return;
+			ram = current;
+			lcd.setCursor(0, 0);
+			lcd.print(F(STUDENT_ID));
+			lcd.setCursor(0, 1);
+			lcd.print(ram);
+			lcd.write('B');
+			clear::current();
 		}
 	protected:
 		uint16_t ram;
@@ -826,13 +839,35 @@ namespace Channel {
 }
 
 namespace Protocol {
-	inline void exhaust_serial() {
-		if (Serial.available())
-			while (Serial.read() != '\n');
+	// Empties the serial buffer until a newline is found
+
+	// Time Read taken from the Serial Class
+	inline int read() {
+		int c;
+		const auto start = millis();
+		do {
+			c = Serial.read();
+			if (c >= 0) return c;
+		} while (millis() - start < 1000);
+		return -1; // -1 indicates timeout
+	}
+
+	// TODO: Custom serial reader
+	inline uint8_t readline(char* buffer, const uint8_t size) {
+		size_t index = 0;
+		while (index < size) {
+			const auto c = read();
+			if (c < 0 || c == '\n')	return index;
+			*buffer++ = static_cast<const char>(c);
+			++index;
+		}
+		// Exhaust the Serial buffer
+		while (Serial.read() != '\n');
+		return index;
 	}
 
 	inline Channel::View read_data(char* buffer, const uint8_t size) {
-		const uint8_t len = Serial.readBytesUntil('\n', buffer, size + 1); // Plus 1 for the channel
+		const uint8_t len = readline(buffer, size + 1); // Plus 1 for the channel
 		const uint8_t idx = *buffer - 'A';
 		buffer[0] = len - 1;
 		return Channel::View(idx);
@@ -849,6 +884,10 @@ namespace Protocol {
 			Channel::eeprom::create(channel, 0, UINT8_MAX);
 		channel.desc = buf + 1;
 		Window::menu.headers();
+		if (auto display = Channel::Display::active(channel)) {
+			display->scroll = Scroll::PAUSE;
+			display->event(Event::Description);
+		}
 		return true;
 	}
 
@@ -897,26 +936,23 @@ namespace Protocol {
 		if (Serial.available()) {
 			bool result = false;
 			char buf[cexpr::protocol]{ '\0' };
-			const char v = Serial.read();
-			switch (v) {
+			const char cmd = Serial.read();
+			switch (cmd) {
 				case OP::NOOP:		return;
 				case OP::CREATE:	result = create(buf); break;
 				case OP::VALUE:		result = write(OP::VALUE, buf); break;
 				case OP::MAX:		result = write(OP::MAX, buf); break;
 				case OP::MIN:		result = write(OP::MIN, buf); break;
-				default:
-					Serial.readBytesUntil('\n', buf, cexpr::protocol);
 			}
 			if (!result) {
 				Serial.print(F("ERROR: "));
-				Serial.print(v);
+				Serial.print(cmd);
 				Serial.println(buf);
 			}
 			else {
 				buf[0] += '0';
-				log_ddebug(v, buf);
+				log_ddebug(cmd, buf);
 			}
-			exhaust_serial();
 		}
 	}
 } // namespace Protocol
