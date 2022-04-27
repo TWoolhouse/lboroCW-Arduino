@@ -161,10 +161,8 @@ struct Backlight {
 		PURPLE = 5,
 		WHITE = 7
 	};
-	Colour colour;
-	Backlight() : colour(Colour::CLEAR) {}
+	Backlight() {} // : colour(Colour::CLEAR) {}
 	inline Backlight& operator=(const Colour colour) {
-		this->colour = colour;
 		lcd.setBacklight(colour);
 		return *this;
 	}
