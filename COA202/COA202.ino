@@ -42,7 +42,7 @@ namespace cexpr {
 	// Includes the current value as well
 	constexpr uint8_t history = 64;
 }
-#define EXTENSIONS "UDCHARS,FREERAM,HCI,EEPROM,RECENT,NAMES,SCROLL"
+#define EXTENSIONS "UDCHARS,FREERAM,HCI,EEPROM,RECENT,NAMES,SCROLL\n"
 
 // Debug Output
 #pragma region Debug Output
@@ -55,7 +55,8 @@ Serial.print(__PRETTY_FUNCTION__); \
 Serial.print(' '); \
 Serial.print(__LINE__); \
 Serial.print(F(" >> ")); \
-Serial.println(message); \
+Serial.print(message); \
+Serial.print('\n'); \
 }
 
 // Log Double Debug - A pair of values
@@ -69,7 +70,8 @@ Serial.print(__LINE__); \
 Serial.print(F(" >> ")); \
 Serial.print(message); \
 Serial.print(F(": ")); \
-Serial.println(value); \
+Serial.print(value); \
+Serial.print('\n'); \
 }
 
 #define assert(cond, msg) ::assertion(cond, F(msg), __LINE__)
@@ -282,86 +284,6 @@ namespace Arrow {
 	}
 }
 
-// History manages all new values entered to provide avg as well as removing the old values in accordance to memory culling
-// Values are managed in a variable length queue which manages its own size using the current ram usage of the entire program
-struct History {
-	// A single record
-	struct Transaction {
-		uint8_t index; // Channel Index
-		uint8_t value;
-	};
-	uint16_t count; // Length of the queue
-	Transaction* queue;
-
-	// Creates a queue of size 1 with a transaction referencing an invalid channel
-	History() : count(1), queue(alloc::m<Transaction>(1)) {
-		queue[0] = Transaction{
-			cexpr::channels,
-			0
-		};
-	}
-	// Appends a new transaction to the queue and culls the queue if necessary
-	void append(const Transaction transaction) {
-		// Technically it's prepending the transactions as the queue is implemented backwards where
-		// the most recent transactions are at the front of memory and the oldest get push to the end
-
-		cull();
-		uint8_t usage = 0; // Number of transaction for this channel
-		for (uint16_t i = 0; i < count; ++i) {
-			if (queue[i].index == transaction.index && ++usage >= cexpr::history) {
-				// Shift everything up to last element with this channel index in the queue by one,
-				// leaving a new empty space at the start
-				// Inserts the new transaction at the start
-				alloc::move(queue + 1, queue, i);
-				queue[0] = transaction;
-				return;
-			}
-		}
-		auto queue_tmp = alloc::r(queue, ++count);
-		// If realloc can not find a new memory block
-		// then cycle the queue forwards and retain the current size
-		if (!queue_tmp) {
-			--count;
-		}
-		else {
-			queue = queue_tmp;
-		}
-		alloc::move(queue + 1, queue, (count - 1));
-		queue[0] = transaction;
-	}
-	// Reduce the queue size by 1
-	void pop() {
-		queue = alloc::r(queue, --count);
-	}
-	// Reduces the size of the queue until free ram is above an acceptible limit
-	void cull() {
-		while (free_memory() < cexpr::memory_cull)
-			pop();
-	}
-
-	// Find the first transaction value belonging to a specfic channel
-	uint16_t first(const uint8_t index) const {
-		for (uint16_t i = 0; i < count; ++i) {
-			if (queue[i].index == index)
-				return queue[i].value;
-		}
-		return UINT16_MAX;
-	}
-	// Calculate the average value for a specific channel
-	uint8_t avg(const uint8_t index) const {
-		uint16_t total = 0;
-		uint8_t found = 0;
-		for (uint16_t i = 0; i < count; ++i) {
-			if (queue[i].index == index) {
-				total += queue[i].value;
-				++found;
-			}
-		}
-		return round(total / static_cast<float>(found));
-	}
-
-} history;
-
 // Rendering Events Bit Mask
 struct Event {
 protected:
@@ -385,6 +307,86 @@ public:
 };
 
 namespace Channel {
+
+	// History manages all new values entered to provide avg as well as removing the old values in accordance to memory culling
+	// Values are managed in a variable length queue which manages its own size using the current ram usage of the entire program
+	struct History {
+		// A single record
+		struct Transaction {
+			uint8_t index; // Channel Index
+			uint8_t value;
+		};
+		uint16_t count; // Length of the queue
+		Transaction* queue;
+
+		// Creates a queue of size 1 with a transaction referencing an invalid channel
+		History() : count(1), queue(alloc::m<Transaction>(1)) {
+			queue[0] = Transaction{
+				cexpr::channels,
+				0
+			};
+		}
+		// Appends a new transaction to the queue and culls the queue if necessary
+		void append(const Transaction transaction) {
+			// Technically it's prepending the transactions as the queue is implemented backwards where
+			// the most recent transactions are at the front of memory and the oldest get push to the end
+
+			cull();
+			uint8_t usage = 0; // Number of transaction for this channel
+			for (uint16_t i = 0; i < count; ++i) {
+				if (queue[i].index == transaction.index && ++usage >= cexpr::history) {
+					// Shift everything up to last element with this channel index in the queue by one,
+					// leaving a new empty space at the start
+					// Inserts the new transaction at the start
+					alloc::move(queue + 1, queue, i);
+					queue[0] = transaction;
+					return;
+				}
+			}
+			auto queue_tmp = alloc::r(queue, ++count);
+			// If realloc can not find a new memory block
+			// then cycle the queue forwards and retain the current size
+			if (!queue_tmp) {
+				--count;
+			}
+			else {
+				queue = queue_tmp;
+			}
+			alloc::move(queue + 1, queue, (count - 1));
+			queue[0] = transaction;
+		}
+		// Reduce the queue size by 1
+		void pop() {
+			queue = alloc::r(queue, --count);
+		}
+		// Reduces the size of the queue until free ram is above an acceptible limit
+		void cull() {
+			while (free_memory() < cexpr::memory_cull)
+				pop();
+		}
+
+		// Find the first transaction value belonging to a specfic channel
+		uint16_t first(const uint8_t index) const {
+			for (uint16_t i = 0; i < count; ++i) {
+				if (queue[i].index == index)
+					return queue[i].value;
+			}
+			return UINT16_MAX;
+		}
+		// Calculate the average value for a specific channel
+		uint8_t avg(const uint8_t index) const {
+			uint16_t total = 0;
+			uint8_t found = 0;
+			for (uint16_t i = 0; i < count; ++i) {
+				if (queue[i].index == index) {
+					total += queue[i].value;
+					++found;
+				}
+			}
+			return round(total / static_cast<float>(found));
+		}
+
+	} history;
 
 	// EEProm Controller
 	class eeprom {
@@ -971,7 +973,8 @@ namespace Protocol {
 			if (!result) {
 				Serial.print(F("ERROR: "));
 				Serial.print(cmd);
-				Serial.println(buf);
+				Serial.print(buf);
+				Serial.print('\n');
 			}
 			else {
 				buf[0] += '0';
@@ -1010,7 +1013,7 @@ void setup() {
 	} while (!Serial.available() || Serial.read() != 'X');
 
 	// Synchronisation Done
-	Serial.println(F(EXTENSIONS));
+	Serial.print(F(EXTENSIONS));
 	Backlight = Backlight::Colour::WHITE;
 
 	Arrow::upload();
