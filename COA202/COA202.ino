@@ -71,10 +71,26 @@ Serial.print(message); \
 Serial.print(F(": ")); \
 Serial.println(value); \
 }
+
+#define assert(cond, msg) ::assertion(cond, F(msg), __LINE__)
+
 #else // !DEBUG
 #define log_debug(message)
 #define log_ddebug(message, value)
+#define assert(cond, msg)
 #endif // DEBUG
+
+void assertion(bool condition, const __FlashStringHelper* msg, const int line) {
+	if (condition) [[likely]]; else {
+		Serial.print(F("DEBUG: Fatal Assertion @"));
+		Serial.print(line);
+		Serial.print(F(" : "));
+		Serial.print(msg);
+		Serial.flush();
+		abort();
+	}
+}
+
 #pragma endregion Debug Output
 
 // Helper Macros
@@ -101,6 +117,7 @@ struct Picture {
 		byte buf[8];
 		memcpy_P(buf, img, sizeof(buf));
 		lcd.createChar(pos, buf);
+		log_ddebug("Uploaded", pos);
 	}
 	operator uint8_t() const {
 		return pos;
@@ -145,6 +162,17 @@ namespace alloc {
 	INLINE T* r(T* ptr, const uint16_t size) {
 		return reinterpret_cast<T*>(realloc(ptr, sizeof(T) * size));
 	}
+	// Typed Memcpy
+	template<typename T>
+	INLINE T* copy(T* dst, const T* const src, const uint16_t size) {
+		return reinterpret_cast<T*>(memcpy(dst, src, sizeof(T) * size));
+	}
+	// Typed Memmove
+	template<typename T>
+	INLINE T* move(T* dst, T* src, const uint16_t size) {
+		return reinterpret_cast<T*>(memmove(dst, src, sizeof(T) * size));
+	}
+
 	INLINE void f(void* ptr) {
 		// Free for the sake of completeness
 		return free(ptr);
@@ -161,11 +189,12 @@ struct Backlight {
 		PURPLE = 5,
 		WHITE = 7
 	};
-	Backlight() {} // : colour(Colour::CLEAR) {}
+	Backlight() {}
 	inline Backlight& operator=(const Colour colour) {
 		lcd.setBacklight(colour);
 		return *this;
 	}
+	Backlight& operator=(const Backlight&) = delete;
 } Backlight;
 
 struct Timer {
@@ -203,7 +232,7 @@ protected:
 enum class Display : uint8_t {
 	Setup,
 	Menu,
-	ID
+	ID,
 };
 template<> State<Display>& State<Display>::operator=(const Type state);
 State<Display> state{ Display::Setup };
@@ -211,7 +240,7 @@ State<Display> state{ Display::Setup };
 
 #pragma region State Scroll
 // Scrolling of Description Text
-// Text should stay frozen in place for 1.5sec before it begins to scroll @ 2 char/sec
+// Text should stay frozen in place for 2sec before it begins to scroll @ 2 char/sec
 enum class Scroll : uint8_t {
 	PAUSE, RUN
 };
@@ -283,7 +312,7 @@ struct History {
 				// Shift everything up to last element with this channel index in the queue by one,
 				// leaving a new empty space at the start
 				// Inserts the new transaction at the start
-				memmove(queue + 1, queue, sizeof(Transaction) * i);
+				alloc::move(queue + 1, queue, i);
 				queue[0] = transaction;
 				return;
 			}
@@ -297,14 +326,20 @@ struct History {
 		else {
 			queue = queue_tmp;
 		}
-		memmove(queue + 1, queue, sizeof(Transaction) * (count - 1));
+		alloc::move(queue + 1, queue, (count - 1));
 		queue[0] = transaction;
 	}
 	// Reduce the queue size by 1
 	void pop() {
 		queue = alloc::r(queue, --count);
 	}
-	// Find the first transaction belonging to a specfic channel
+	// Reduces the size of the queue until free ram is above an acceptible limit
+	void cull() {
+		while (free_memory() < cexpr::memory_cull)
+			pop();
+	}
+
+	// Find the first transaction value belonging to a specfic channel
 	uint16_t first(const uint8_t index) const {
 		for (uint16_t i = 0; i < count; ++i) {
 			if (queue[i].index == index)
@@ -312,7 +347,7 @@ struct History {
 		}
 		return UINT16_MAX;
 	}
-	// Calculate the average for a specific channel
+	// Calculate the average value for a specific channel
 	uint8_t avg(const uint8_t index) const {
 		uint16_t total = 0;
 		uint8_t found = 0;
@@ -325,11 +360,6 @@ struct History {
 		return round(total / static_cast<float>(found));
 	}
 
-	// Reduces the size of the queue until free ram is above an acceptible limit
-	void cull() {
-		while (free_memory() < cexpr::memory_cull)
-			pop();
-	}
 } history;
 
 // Rendering Events Bit Mask
@@ -349,9 +379,9 @@ public:
 	constexpr Event(const decltype(flags) flags) : flags(flags) {}
 	constexpr inline bool any() const { return flags; }
 	constexpr inline bool all() const { return flags == Flag::All; }
-	constexpr inline bool head() const { return bitRead(flags, 0); }
-	constexpr inline bool value() const { return bitRead(flags, 1); }
-	constexpr inline bool description() const { return bitRead(flags, 2); }
+	constexpr inline bool head() const { return flags & Flag::Head; }
+	constexpr inline bool value() const { return flags & Flag::Value; }
+	constexpr inline bool description() const { return flags & Flag::Description; }
 };
 
 namespace Channel {
@@ -451,7 +481,7 @@ namespace Channel {
 		// Helper class to allow all subclasses to access the parent View
 		// It's really dodgy as it assumes the class is the first attribute in the class
 		// Hence the View is required to be a union so all attributes are squished togeather
-		struct AttrHelper { INLINE const uint8_t index() const { return reinterpret_cast<const View*>(this)->index; } };
+		struct AttrHelper { INLINE constexpr uint8_t index() const { return reinterpret_cast<const View*>(this)->index; } };
 
 		// The attributes below use c++ operator overloading to overload the assignment operator
 		// So instead of assigning to a variable in memory, it executes a function instead
@@ -481,11 +511,11 @@ namespace Channel {
 		Boundary<eeprom::offset::min> min;
 		Boundary<eeprom::offset::max> max;
 
-		inline operator const uint8_t() const { return index; }
-		INLINE const char letter() const { return index + 'A'; }
+		inline constexpr operator const uint8_t() const { return index; }
+		INLINE constexpr char letter() const { return index + 'A'; }
 
-		// Is the index is valid
-		INLINE bool valid() const { return index < cexpr::channels; }
+		// Is the index valid
+		INLINE constexpr bool valid() const { return index < cexpr::channels; }
 		// Is the channel found in the eeprom
 		bool exists() const {
 			if (!valid())
@@ -537,7 +567,7 @@ namespace Channel {
 		Display& operator=(const Display& other) {
 			if (this == &other)	return *this;
 			channel = other.channel;
-			memcpy(&scroll, &other.scroll, sizeof(Scroller));
+			alloc::copy(&scroll, &other.scroll, 1);
 			events = Event::Flag::All;
 			return *this;
 		}
@@ -652,12 +682,10 @@ namespace Window {
 		}
 
 		// Render a single channel
-		bool render(Channel::Display& display) {
+		void render(Channel::Display& display) {
 			if (!display.events.any()) return;
-			if (!display.valid()) {
-				clear::line(display.row);
-				return false;
-			}
+			if (!display.valid())
+				return clear::line(display.row);
 
 			if (display.events.head()) {
 				// Function ptr to pick checking up or down, to determine which arrow to render, if any
@@ -667,9 +695,6 @@ namespace Window {
 				Render::value(display);
 			if (display.events.description())
 				Render::description(display);
-
-			// Return if the backlight might need changing
-			return display.events.value();
 		}
 
 		// Edits the current channel indices to render
@@ -724,10 +749,11 @@ namespace Window {
 						display.scroll = Scroll::RUN;
 					++display.scroll.pos;
 					display.event(Event::Flag::Description);
-					display.scroll.timer.reset();
+					// display.scroll.timer.reset();
 				}
 				// Render to the screen
-				backlight = render(display);
+				render(display);
+				backlight = display.events.value();
 				display.reset(); // Empty events
 			}
 			if (backlight) {
@@ -965,6 +991,8 @@ State<Display>& State<Display>::operator=(const Type state) {
 			Window::menu.begin(); break;
 		case Type::ID:
 			Window::id.begin(); break;
+		default:
+			assert(false, "Invalid State Passed to State<Display>");
 	}	return *this;
 }
 

@@ -30,7 +30,7 @@ args = parser.parse_args()
 
 # Open the serial port (this will reset your Arduino)
 print('connecting to port', args.port)
-ser = serial.Serial(args.port, 9600, timeout=0.25,
+ser = serial.Serial(args.port, 9600, timeout=1, # 0.25
 					rtscts=False, xonxoff=False, dsrdtr=False)
 
 print("waiting for sync")
@@ -51,24 +51,40 @@ print(line)  # This should print BASIC or your extension list
 # the b'' notation creates byte arrays suitable for
 # passing to ser.write().  ser.write() will not accept
 # str variables.
-
+print("SETUP COMPLETE")
 msgs = [
-	"CAMain",
+	"CAFirst",
+	"XA5",
+	"VA10",
+	"VA15\nVA20",
+
 	"CBSecondary",
-	"VA50",
-	"VA100",
-	"VA150",
-	"VB5",
-	"VA200",
-	"VA250",
-	"VB4",
-	"CCMain",
-	"XC100",
-	"NC50",
-	"VC0",
+	"VB15",
+	"CCThird",
+	"NC25",
+	"VC20",
+
+	"CDFourth",
+	"XD20",
+	"VD25",
+
+	# "XA25",
+	# "VA50",
+	# "VA100",
+	# "VA150",
+	# "VB5",
+	# "VA200",
+	# "VA250",
+	# "VB4",
+	# "XC100",
+	# "NC50",
+	# "VC0",
+	# "XD50",
+	# "VD70",
+	# "VD250"
 ]
 import string
-# msgs = [f"C{letter}{letter} Channel      " for letter in string.ascii_uppercase]
+# msgs = [f"C{letter}{letter} Channel {letter}" for letter in string.ascii_uppercase]
 # msgs.extend((f"V{letter}{val}" for val in range(1, 100) for letter in string.ascii_uppercase))
 
 # msgs = [
@@ -82,18 +98,19 @@ import string
 # Simply write these messages out once per second
 # Customise above and below as you see fit.
 
-for x in msgs:
-	print("> WRT:", str(x))
-	ser.write(x.encode()+b'\n')
-
+def reading():
 	# Check for message back.  This will timeout after a second
 	line = True
 	while line:
 		line = ser.readline()
 		if line:
-			print(line.decode().strip())
+			print(line)
+
+for x in msgs:
+	reading()
+	print("> WRT:", str(x))
+	ser.write(x.encode()+b'\n')
+	reading()
 print("""##########\nSENDING DONE\n##########""")
 while True:
-	line = ser.readline()
-	if line:
-		print(line.decode().strip())
+	reading()
