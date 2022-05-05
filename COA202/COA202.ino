@@ -573,7 +573,7 @@ namespace Window {
 		Display() : row(2), channel(cexpr::channels), events(Event::Flag::All), scroll() {}
 		Display(uint8_t row, Channel::View channel) : row(row), channel(channel), events(Event::Flag::All), scroll() {}
 
-		// TODO: Describe the assignment operators
+		// When the display is assigned a new channel scrolling is reset and needs to be fully rendered
 		Display& operator=(Channel::View channel) {
 			if (this->channel.index == channel.index)	return *this;
 			if (!active(channel))
@@ -853,7 +853,7 @@ namespace Window {
 			lcd.print(F(STUDENT_ID));
 			lcd.setCursor(0, 1);
 			lcd.print(ram);
-			lcd.write('B');
+			lcd.print(" Bytes");
 			clear::current();
 		}
 	protected:
@@ -876,7 +876,7 @@ namespace Protocol {
 		return -1; // -1 indicates timeout
 	}
 
-	// TODO: Custom serial reader
+	// reads a line and will clear the serial buffer if there is more data than needed.
 	inline uint8_t readline(char* buffer, const uint8_t size) {
 		size_t index = 0;
 		while (index < size) {
@@ -890,6 +890,8 @@ namespace Protocol {
 		return index;
 	}
 
+	// Reads the serial buffer and decodes the channel
+	// The first character in the buffer returned is the length of data read from the buffer.
 	inline Channel::View read_data(char* buffer, const uint8_t size) {
 		const uint8_t len = readline(buffer, size + 1); // Plus 1 for the channel
 		const uint8_t idx = *buffer - 'A';
@@ -897,17 +899,21 @@ namespace Protocol {
 		return Channel::View(idx);
 	}
 
+	// Creating a channel
 	inline bool create(char* buf) {
 		auto channel = read_data(buf, cexpr::create);
 		if (!channel.valid()) {
 			buf[0] = channel.letter();
 			return false;
 		}
+		// Adds a null character at the end of the description
 		buf[buf[0] + 1] = '\0';
-		if (!channel.exists())
+		if (!channel.exists()) // Add the channel to the eeprom if not updating one
 			Channel::eeprom::create(channel, 0, UINT8_MAX);
 		channel.desc = buf + 1;
+		// Request the screen be rendered
 		Window::menu.headers();
+		// If the channel is currently on screen, make sure the scrolling is reset
 		if (auto display = Window::Display::active(channel)) {
 			display->scroll = Scroll::PAUSE;
 			display->event(Event::Description);
@@ -915,6 +921,7 @@ namespace Protocol {
 		return true;
 	}
 
+	// String to integer
 	inline uint16_t convert_int(char* buf) {
 		uint16_t total = 0;
 		for (uint8_t i = buf[0], p = 1; i > 0 && '0' <= buf[i] && buf[i] <= '9'; --i, p *= 10) {
@@ -931,6 +938,7 @@ namespace Protocol {
 		NOOP = '\n'
 	};
 
+	// Decoding 3 character long numbers
 	bool write(const OP op, char* buf) {
 		auto channel = read_data(buf, cexpr::write);
 		if (!channel.exists()) return false;
@@ -939,6 +947,7 @@ namespace Protocol {
 			return false;
 		}
 		const auto v = convert_int(buf);
+		// Can not be greater than 255
 		if (v > UINT8_MAX)	return false;
 		switch (op) {
 			case OP::VALUE:
@@ -948,9 +957,11 @@ namespace Protocol {
 			case OP::MAX:
 				channel.max = v;	break;
 		}
+		// When the channel is currently on screen, the value needs to be rendered
 		if (auto display = Window::Display::active(channel))
 			display->event(Event::Flag::Value);
 
+		// Required when a predicate is active and the min / max is relevant.
 		Window::menu.evaluate_index(Window::Menu::Direction::CONSTANT);
 		channel.log();
 		return true;
@@ -977,6 +988,7 @@ namespace Protocol {
 			else {
 				buf[0] += '0';
 				log_ddebug(cmd, buf);
+				// First character of the debug is the length of the string
 			}
 		}
 	}
