@@ -5,6 +5,7 @@ Adafruit_RGBLCDShield lcd;
 
 // #define DEBUG
 #define STUDENT_ID "F121584"
+#define EXTENSIONS "UDCHARS,FREERAM,HCI,EEPROM,RECENT,NAMES,SCROLL\n"
 
 // Constants
 namespace cexpr {
@@ -42,7 +43,6 @@ namespace cexpr {
 	// Includes the current value as well
 	constexpr uint8_t history = 64;
 }
-#define EXTENSIONS "UDCHARS,FREERAM,HCI,EEPROM,RECENT,NAMES,SCROLL\n"
 
 // Debug Output
 #pragma region Debug Output
@@ -229,16 +229,16 @@ protected:
 	Type value;
 };
 
-// State of the Display
-#pragma region State Display
-enum class Display : uint8_t {
+// State of the Scene
+#pragma region State Scene
+enum class Scene : uint8_t {
 	Setup,
 	Menu,
 	ID,
 };
-template<> State<Display>& State<Display>::operator=(const Type state);
-State<Display> state{ Display::Setup };
-#pragma endregion State Display
+template<> State<Scene>& State<Scene>::operator=(const Type state);
+State<Scene> state{ Scene::Setup };
+#pragma endregion State Scene
 
 #pragma region State Scroll
 // Scrolling of Description Text
@@ -542,23 +542,39 @@ namespace Channel {
 		}
 
 	};
+}
+
+namespace Window {
+
+	namespace clear {
+		static inline void current() {
+			lcd.print(F("                ")); // String length of LCD Width
+		}
+		static inline void line(const uint8_t row) {
+			lcd.setCursor(0, row);
+			current();
+		}
+		static inline void all() {
+			lcd.clear();
+		}
+	}
 
 	// Represents a channel on the LCD display
 	struct Display {
 		uint8_t row;
-		View channel;
+		Channel::View channel;
 		Event events;
 		Scroller scroll;
 
 		// Return the display if it is currently rendered on screen
-		static Display* active(const View channel);
+		static Display* active(const Channel::View channel);
 
 		// Default constructor makes a completely invalid Display
 		Display() : row(2), channel(cexpr::channels), events(Event::Flag::All), scroll() {}
-		Display(uint8_t row, View channel) : row(row), channel(channel), events(Event::Flag::All), scroll() {}
+		Display(uint8_t row, Channel::View channel) : row(row), channel(channel), events(Event::Flag::All), scroll() {}
 
 		// TODO: Describe the assignment operators
-		Display& operator=(View channel) {
+		Display& operator=(Channel::View channel) {
 			if (this->channel.index == channel.index)	return *this;
 			if (!active(channel))
 				scroll = Scroll::PAUSE;
@@ -578,30 +594,14 @@ namespace Channel {
 		inline void event(const Event::Flag event) { events = events | event; }
 		inline void reset() { events = Event::Flag::None; }
 	};
-}
-
-namespace Window {
-
-	namespace clear {
-		static inline void current() {
-			lcd.print(F("                ")); // String length of LCD Width
-		}
-		static inline void line(const uint8_t row) {
-			lcd.setCursor(0, row);
-			current();
-		}
-		static inline void all() {
-			lcd.clear();
-		}
-	}
 
 	struct Render {
-		static void head(Channel::Display& display, const uint8_t arrow) {
+		static void head(Display& display, const uint8_t arrow) {
 			lcd.setCursor(0, display.row);
 			lcd.write(arrow);
 			lcd.write(display.channel.letter());
 		}
-		static void value(Channel::Display& display) {
+		static void value(Display& display) {
 			lcd.setCursor(2, display.row);
 			const uint16_t val = display.channel.value;
 			if (val > UINT8_MAX) { // A value does not exist if its above a uint8_t
@@ -614,7 +614,7 @@ namespace Window {
 			}
 
 		}
-		static void description(Channel::Display& display) {
+		static void description(Display& display) {
 			lcd.setCursor(10, display.row);
 			const uint8_t len = strlen(display.channel.desc);
 			if (len > cexpr::lcd_width - 10) // Only scroll if the text is too long
@@ -623,7 +623,7 @@ namespace Window {
 				lcd.print(display.channel.desc);
 			clear::current();
 		}
-		static void layout(Channel::Display& display) {
+		static void layout(Display& display) {
 			lcd.setCursor(9, display.row);
 			// This space only needs to be drawn once not on every scroll
 			lcd.write(' ');
@@ -650,9 +650,9 @@ namespace Window {
 			PREDICATE = 2, // Special algorithm when changing predicate
 		};
 	protected:
-		friend Channel::Display;
+		friend Display;
 		Timer selector{ 1000 }; // 1sec Time required before switching to the ID screen
-		Channel::Display channels[cexpr::lcd_height] = { {0, UINT8_MAX}, {1, UINT8_MAX} };
+		Display channels[cexpr::lcd_height] = { {0, UINT8_MAX}, {1, UINT8_MAX} };
 		uint8_t last_input = 0; // Events of the last frame
 
 		// Determines if the channel can be shown in the current display mode
@@ -684,7 +684,7 @@ namespace Window {
 		}
 
 		// Render a single channel
-		void render(Channel::Display& display) {
+		void render(Display& display) {
 			if (!display.events.any()) return;
 			if (!display.valid())
 				return clear::line(display.row);
@@ -700,7 +700,7 @@ namespace Window {
 		}
 
 		// Edits the current channel indices to render
-		bool evaluate_index(const Direction dir, Channel::Display(&previous)[cexpr::lcd_height]) {
+		bool evaluate_index(const Direction dir, Display(&previous)[cexpr::lcd_height]) {
 			switch (dir) {
 				case Direction::UP:
 					if (const auto next = find_up(channels[0].channel); Channel::View(next).valid()) {
@@ -771,7 +771,7 @@ namespace Window {
 			// Change to ID Mode
 			if (events & BUTTON_SELECT) {
 				if (selector.active()) {
-					state = Display::ID;
+					state = Scene::ID;
 					return false;
 				}
 			}
@@ -815,7 +815,7 @@ namespace Window {
 			if (channels[0].channel >= cexpr::channels)
 				if (channels[0] = find_down(UINT8_MAX); !channels[0].valid())
 					return false;
-			Channel::Display old[cexpr::lcd_height];
+			Display old[cexpr::lcd_height];
 			memcpy(&old, &channels, sizeof(old));
 			return evaluate_index(dir, old);
 		}
@@ -825,6 +825,13 @@ namespace Window {
 		value = state;
 		menu.evaluate_index(value == Predicate::all ? Direction::CONSTANT : Direction::PREDICATE);
 		menu.event(Event::Flag::Head);
+	}
+	Display* Display::active(const Channel::View channel) {
+		for (auto& display : Window::menu.channels) {
+			if (display.channel.index == channel.index)
+				return &display;
+		}
+		return nullptr;
 	}
 
 	struct ID {
@@ -836,7 +843,7 @@ namespace Window {
 		}
 		void poll_input() {
 			if (!(lcd.readButtons() & BUTTON_SELECT))
-				state = Display::Menu;
+				state = Scene::Menu;
 		}
 		void render() {
 			const decltype(ram) current = free_memory();
@@ -852,16 +859,7 @@ namespace Window {
 	protected:
 		uint16_t ram;
 	} id;
-}
 
-namespace Channel {
-	Display* Display::active(const View channel) {
-		for (auto& display : Window::menu.channels) {
-			if (display.channel.index == channel.index)
-				return &display;
-		}
-		return nullptr;
-	}
 }
 
 namespace Protocol {
@@ -910,7 +908,7 @@ namespace Protocol {
 			Channel::eeprom::create(channel, 0, UINT8_MAX);
 		channel.desc = buf + 1;
 		Window::menu.headers();
-		if (auto display = Channel::Display::active(channel)) {
+		if (auto display = Window::Display::active(channel)) {
 			display->scroll = Scroll::PAUSE;
 			display->event(Event::Description);
 		}
@@ -950,7 +948,7 @@ namespace Protocol {
 			case OP::MAX:
 				channel.max = v;	break;
 		}
-		if (auto display = Channel::Display::active(channel))
+		if (auto display = Window::Display::active(channel))
 			display->event(Event::Flag::Value);
 
 		Window::menu.evaluate_index(Window::Menu::Direction::CONSTANT);
@@ -985,7 +983,7 @@ namespace Protocol {
 } // namespace Protocol
 
 template<>
-State<Display>& State<Display>::operator=(const Type state) {
+State<Scene>& State<Scene>::operator=(const Type state) {
 	if (state == value)	return *this;
 	value = state;
 	Window::clear::all();
@@ -995,7 +993,7 @@ State<Display>& State<Display>::operator=(const Type state) {
 		case Type::ID:
 			Window::id.begin(); break;
 		default:
-			assert(false, "Invalid State Passed to State<Display>");
+			assert(false, "Invalid State Passed to State<Scene>");
 	}	return *this;
 }
 
@@ -1019,17 +1017,17 @@ void setup() {
 	Arrow::upload();
 	Channel::eeprom::setup();
 	Window::menu.evaluate_index(Window::Menu::Direction::CONSTANT);
-	state = Display::Menu;
+	state = Scene::Menu;
 }
 
 void loop() {
 	Protocol::process();
 	switch (state) {
-		case Display::Menu:
+		case Scene::Menu:
 			if (Window::menu.poll_input())
 				Window::menu.render();
 			return;
-		case Display::ID:
+		case Scene::ID:
 			Window::id.poll_input();
 			return Window::id.render();
 	}
